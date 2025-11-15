@@ -40,6 +40,8 @@ String temperatureC = "--";
 // Timer variables
 unsigned long lastTime = 0;  
 unsigned long timerDelay = 30000;
+unsigned long lastWiFiCheck = 0;
+const unsigned long WIFI_CHECK_INTERVAL = 30000;  // Check WiFi every 30 seconds
 
 // WiFi credentials are stored in include/secrets.h as WIFI_SSID and WIFI_PASSWORD
 
@@ -71,30 +73,9 @@ String readDSTemperatureF() {
   return String(tempF);
 }
 
-// Log buffer to collect messages for CloudWatch
-#define MAX_LOG_ENTRIES 50
-struct LogEntry {
-  String message;
-  unsigned long timestamp;
-};
-LogEntry logBuffer[MAX_LOG_ENTRIES];
-int logIndex = 0;
-
+// Simple logging function - just output to serial
 void logMessage(String msg) {
-  // Print to serial always
   Serial.println(msg);
-  
-  // Buffer the message for CloudWatch upload
-  if (logIndex < MAX_LOG_ENTRIES) {
-    logBuffer[logIndex].message = msg;
-    logBuffer[logIndex].timestamp = millis();
-    logIndex++;
-  }
-  
-  // Optional: publish to MQTT if connected (disabled by default, too verbose)
-  // if (mqttClient.connected()) {
-  //   mqttClient.publish(MQTT_TOPIC, msg.c_str());
-  // }
 }
 
 // Update both temperature globals in one call. Use this in loop() to refresh values.
@@ -339,21 +320,16 @@ void setup(){
 }
  
 void loop(){
-  // Check WiFi connection and reconnect if needed
-  if (WiFi.status() != WL_CONNECTED) {
-    logMessage("WiFi disconnected, attempting reconnection...");
-    int attempts = 0;
-    while (WiFi.status() != WL_CONNECTED && attempts < 10) {
-      WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-      delay(10000);  // Wait 10 seconds for connection
-      attempts++;
-      Serial.printf("Reconnection attempt %d/10\n", attempts);
-    }
+  // Non-blocking WiFi connection check
+  unsigned long now = millis();
+  if (now - lastWiFiCheck > WIFI_CHECK_INTERVAL) {
+    lastWiFiCheck = now;
+    
     if (WiFi.status() != WL_CONNECTED) {
-      logMessage("Reconnection failed after 10 attempts, restarting ESP...");
-      ESP.restart();
+      Serial.println("WiFi disconnected, attempting reconnection...");
+      WiFi.reconnect();  // Non-blocking reconnect attempt
     } else {
-      logMessage("WiFi reconnected successfully");
+      Serial.println("WiFi connected, signal: " + String(WiFi.RSSI()) + " dBm");
     }
   }
 
