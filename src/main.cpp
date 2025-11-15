@@ -21,8 +21,73 @@
 #include <OneWire.h>
 #include <DallasTemperature.h>
 #include <PubSubClient.h>
+#include <ArduinoJson.h>
 #include "secrets.h"
 #include "device_config.h"
+
+// Exponential backoff class for network operations
+class NetworkBackoff {
+private:
+    unsigned long lastFailure = 0;
+    int consecutiveFailures = 0;
+    
+public:
+    unsigned long getBackoffDelay() {
+        if (consecutiveFailures == 0) return 0;
+        
+        // Exponential backoff: 1s, 2s, 4s, 8s, 16s, 32s, 64s, 128s, 256s, 300s (capped)
+        unsigned long delay = min((unsigned long)pow(2, consecutiveFailures - 1) * 1000, MAX_BACKOFF_MS);
+        return max(delay, MIN_BACKOFF_MS);
+    }
+    
+    void recordFailure() {
+        consecutiveFailures = min(consecutiveFailures + 1, MAX_CONSECUTIVE_FAILURES);
+        lastFailure = millis();
+    }
+    
+    void recordSuccess() {
+        consecutiveFailures = 0;
+    }
+    
+    bool shouldRetry() {
+        if (consecutiveFailures == 0) return true;
+        return (millis() - lastFailure) >= getBackoffDelay();
+    }
+    
+    int getConsecutiveFailures() {
+        return consecutiveFailures;
+    }
+};
+
+// Device metrics structure for monitoring
+struct DeviceMetrics {
+    unsigned long bootTime;
+    unsigned int wifiReconnects;
+    unsigned int sensorReadFailures;
+    unsigned int lambdaSendFailures;
+    unsigned int influxSendFailures;
+    float minTempC;
+    float maxTempC;
+    unsigned long lastSuccessfulLambdaSend;
+    unsigned long lastSuccessfulInfluxSend;
+    
+    DeviceMetrics() : bootTime(0), wifiReconnects(0), sensorReadFailures(0), 
+                     lambdaSendFailures(0), influxSendFailures(0),
+                     minTempC(999.0f), maxTempC(-999.0f),
+                     lastSuccessfulLambdaSend(0), lastSuccessfulInfluxSend(0) {}
+    
+    void updateTemperature(float tempC) {
+        if (tempC > -100.0f && tempC < 100.0f) {  // Valid temperature range
+            minTempC = min(minTempC, tempC);
+            maxTempC = max(maxTempC, tempC);
+        }
+    }
+};
+
+// Global instances
+NetworkBackoff lambdaBackoff;
+NetworkBackoff influxBackoff;
+DeviceMetrics metrics;
 
 // Data wire is connected to GPIO 4
 OneWire oneWire(ONE_WIRE_PIN);
@@ -36,9 +101,9 @@ String temperatureC = "--";
 
 // Timer variables
 unsigned long lastTime = 0;  
-unsigned long timerDelay = 30000;
+unsigned long timerDelay = TEMPERATURE_READ_INTERVAL_MS;
 unsigned long lastWiFiCheck = 0;
-const unsigned long WIFI_CHECK_INTERVAL = 30000;  // Check WiFi every 30 seconds
+const unsigned long WIFI_CHECK_INTERVAL = WIFI_CHECK_INTERVAL_MS;  // Check WiFi every 30 seconds
 
 // WiFi credentials are stored in include/secrets.h as WIFI_SSID and WIFI_PASSWORD
 
@@ -88,6 +153,7 @@ void updateTemperatures() {
     temperatureC = "--";
     temperatureF = "--";
     Serial.println("DS18B20 read failed");
+    metrics.sensorReadFailures++;
   } else {
     // Format with 2 decimal places
     char buf[16];
@@ -98,55 +164,84 @@ void updateTemperatures() {
     temperatureF = String(buf);
     logMessage("Temperature C: " + temperatureC);
     logMessage("Temperature F: " + temperatureF);
+    
+    // Update metrics with valid temperature
+    metrics.updateTemperature(tC);
   }
 }
 
 void sendToInfluxDB() {
-  if (WiFi.status() == WL_CONNECTED && isValidTemperature(temperatureC)) {
-    WiFiClientSecure client;
-    // Disable SSL certificate verification (safe for trusted networks)
-    client.setInsecure();
-    
-    HTTPClient http;
-    http.setTimeout(10000);  // 10 second timeout
-    String url = String(INFLUXDB_URL) + "/api/v2/write?bucket=" + String(INFLUXDB_BUCKET) + "&precision=s";
-    
-    Serial.println("InfluxDB URL: " + url);
-    
-    http.begin(client, url);
-    http.addHeader("Authorization", "Token " + String(INFLUXDB_TOKEN));
-    http.addHeader("Content-Type", "text/plain");
-
-    // Line protocol payload for InfluxDB
-    String deviceTag = String(DEVICE_LOCATION);
-    deviceTag.replace(" ", "_");
-    String payload = "temperature,sensor=ds18b20,location=esp12f,device=" + deviceTag + " tempC=" + temperatureC + ",tempF=" + temperatureF;
-    
-    int httpCode = http.POST(payload);
-    
-    if (httpCode > 0) {
-      if (httpCode == 204) {
-        Serial.println("InfluxDB: 204 OK");
-      } else {
-        String response = http.getString();
-        Serial.println("InfluxDB Code " + String(httpCode));
-      }
-    } else {
-      Serial.println("InfluxDB POST failed: " + String(http.errorToString(httpCode)));
-    }
-    http.end();
-  } else {
-    if (WiFi.status() != WL_CONNECTED) {
-      Serial.println("WiFi not connected, skipping InfluxDB");
-    } else {
-      Serial.println("Invalid temperature, skipping InfluxDB");
-    }
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("WiFi not connected, skipping InfluxDB");
+    return;
   }
+
+  // Check if we should retry based on exponential backoff
+  if (!influxBackoff.shouldRetry()) {
+    Serial.println("InfluxDB backoff active, skipping send");
+    return;
+  }
+
+  if (!isValidTemperature(temperatureC)) {
+    Serial.println("Invalid temperature, skipping InfluxDB");
+    return;
+  }
+
+  WiFiClientSecure client;
+  // Disable SSL certificate verification (safe for trusted networks)
+  client.setInsecure();
+  
+  HTTPClient http;
+  http.setTimeout(HTTP_TIMEOUT_MS);  // Use constant
+  String url = String(INFLUXDB_URL) + "/api/v2/write?bucket=" + String(INFLUXDB_BUCKET) + "&precision=s";
+  
+  Serial.println("InfluxDB URL: " + url);
+  
+  http.begin(client, url);
+  http.addHeader("Authorization", "Token " + String(INFLUXDB_TOKEN));
+  http.addHeader("Content-Type", "text/plain");
+
+  // Line protocol payload for InfluxDB
+  String deviceTag = String(DEVICE_LOCATION);
+  deviceTag.replace(" ", "_");
+  String payload = "temperature,sensor=ds18b20,location=esp12f,device=" + deviceTag + " tempC=" + temperatureC + ",tempF=" + temperatureF;
+  
+  int httpCode = http.POST(payload);
+  
+  if (httpCode > 0) {
+    if (httpCode == 204) {
+      Serial.println("InfluxDB: 204 OK");
+      
+      // Record success
+      influxBackoff.recordSuccess();
+      metrics.lastSuccessfulInfluxSend = millis();
+    } else {
+      String response = http.getString();
+      Serial.println("InfluxDB Code " + String(httpCode));
+      
+      // Record failure for backoff
+      influxBackoff.recordFailure();
+      metrics.influxSendFailures++;
+    }
+  } else {
+    Serial.println("InfluxDB POST failed: " + String(http.errorToString(httpCode)));
+    
+    // Record failure for backoff
+    influxBackoff.recordFailure();
+    metrics.influxSendFailures++;
+  }
+  http.end();
 }
 
 void sendToLambda() {
   if (WiFi.status() != WL_CONNECTED) {
     Serial.println("WiFi not connected, skipping Lambda");
+    return;
+  }
+
+  // Check if we should retry based on exponential backoff
+  if (!lambdaBackoff.shouldRetry()) {
+    Serial.println("Lambda backoff active, skipping send");
     return;
   }
 
@@ -160,7 +255,7 @@ void sendToLambda() {
   client.setInsecure();  // Disable SSL verification for ESP8266
   
   HTTPClient http;
-  http.setTimeout(10000);  // 10 second timeout
+  http.setTimeout(HTTP_TIMEOUT_MS);  // Use constant
   
   Serial.println("Sending temperature to Lambda endpoint...");
   
@@ -186,12 +281,24 @@ void sendToLambda() {
       String response = http.getString();
       Serial.println("Lambda response: " + response);
       Serial.println("✅ Data sent to Lambda successfully!");
+      
+      // Record success
+      lambdaBackoff.recordSuccess();
+      metrics.lastSuccessfulLambdaSend = millis();
     } else {
       String response = http.getString();
       Serial.println("❌ Lambda Error " + String(httpCode) + ": " + response);
+      
+      // Record failure for backoff
+      lambdaBackoff.recordFailure();
+      metrics.lambdaSendFailures++;
     }
   } else {
     Serial.println("❌ Lambda POST error: " + String(http.errorToString(httpCode)));
+    
+    // Record failure for backoff
+    lambdaBackoff.recordFailure();
+    metrics.lambdaSendFailures++;
   }
   
   http.end();
@@ -273,7 +380,64 @@ String processor(const String& var){
   return String();
 }
 
+// Health check endpoint response
+String getHealthStatus() {
+  // Use JsonDocument for memory efficiency (replaces deprecated StaticJsonDocument)
+  JsonDocument doc;
+  
+  doc["status"] = "ok";
+  doc["device"] = DEVICE_LOCATION;
+  doc["board"] = DEVICE_BOARD;
+  doc["uptime_seconds"] = (millis() - metrics.bootTime) / 1000;
+  doc["wifi_connected"] = (WiFi.status() == WL_CONNECTED);
+  doc["wifi_rssi"] = WiFi.RSSI();
+  doc["temperature_valid"] = isValidTemperature(temperatureC);
+  doc["current_temp_c"] = temperatureC;
+  doc["current_temp_f"] = temperatureF;
+  doc["last_reading_ms"] = lastTime;
+  
+  // Metrics
+  doc["metrics"]["wifi_reconnects"] = metrics.wifiReconnects;
+  doc["metrics"]["sensor_read_failures"] = metrics.sensorReadFailures;
+  doc["metrics"]["lambda_send_failures"] = metrics.lambdaSendFailures;
+  doc["metrics"]["influx_send_failures"] = metrics.influxSendFailures;
+  
+  // Handle min/max temperature (avoid null values in JSON)
+  if (metrics.minTempC < 900.0f) {
+    doc["metrics"]["min_temp_c"] = metrics.minTempC;
+  } else {
+    doc["metrics"]["min_temp_c"] = nullptr;
+  }
+  
+  if (metrics.maxTempC > -900.0f) {
+    doc["metrics"]["max_temp_c"] = metrics.maxTempC;
+  } else {
+    doc["metrics"]["max_temp_c"] = nullptr;
+  }
+  
+  // Backoff status
+  doc["backoff"]["lambda_active"] = (lambdaBackoff.getConsecutiveFailures() > 0);
+  doc["backoff"]["lambda_failures"] = lambdaBackoff.getConsecutiveFailures();
+  doc["backoff"]["influx_active"] = (influxBackoff.getConsecutiveFailures() > 0);
+  doc["backoff"]["influx_failures"] = influxBackoff.getConsecutiveFailures();
+  
+  // Last successful sends
+  if (metrics.lastSuccessfulLambdaSend > 0) {
+    doc["last_success"]["lambda_seconds_ago"] = (millis() - metrics.lastSuccessfulLambdaSend) / 1000;
+  }
+  if (metrics.lastSuccessfulInfluxSend > 0) {
+    doc["last_success"]["influx_seconds_ago"] = (millis() - metrics.lastSuccessfulInfluxSend) / 1000;
+  }
+  
+  String response;
+  serializeJson(doc, response);
+  return response;
+}
+
 void setup(){
+  // Initialize metrics
+  metrics.bootTime = millis();
+  
   // Serial port for debugging purposes
   Serial.begin(115200);
   Serial.println();
@@ -336,6 +500,13 @@ void setup(){
   server.on("/temperaturef", HTTP_GET, [](AsyncWebServerRequest *request){
     request->send(200, "text/plain", temperatureF);
   });
+  
+  // Health check endpoint
+  server.on("/health", HTTP_GET, [](AsyncWebServerRequest *request){
+    String response = getHealthStatus();
+    request->send(200, "application/json", response);
+  });
+  
   // Start server
   server.begin();
 }
@@ -349,6 +520,7 @@ void loop(){
     if (WiFi.status() != WL_CONNECTED) {
       Serial.println("WiFi disconnected, attempting reconnection...");
       WiFi.reconnect();  // Non-blocking reconnect attempt
+      metrics.wifiReconnects++;
     } else {
       Serial.println("WiFi connected, signal: " + String(WiFi.RSSI()) + " dBm");
     }

@@ -27,4 +27,16 @@ static const char* DEVICE_BOARD = "esp8266";
 // Used for logging timestamps
 static const int TIMEZONE_OFFSET = -5;  // EST/CDT
 
+// Network timing constants
+static const unsigned long WIFI_CONNECT_TIMEOUT_MS = 10000;
+static const unsigned long WIFI_CHECK_INTERVAL_MS = 30000;
+static const unsigned long TEMPERATURE_READ_INTERVAL_MS = 30000;
+static const int MAX_WIFI_ATTEMPTS = 20;
+static const int HTTP_TIMEOUT_MS = 10000;
+
+// Exponential backoff constants
+static const unsigned long MIN_BACKOFF_MS = 1000;      // 1 second
+static const unsigned long MAX_BACKOFF_MS = 300000;    // 5 minutes
+static const int MAX_CONSECUTIVE_FAILURES = 10;
+
 #endif // DEVICE_CONFIG_H
