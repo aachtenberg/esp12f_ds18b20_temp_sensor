@@ -446,12 +446,13 @@ void setup(){
   sensors.begin();
   updateTemperatures();
 
-  // Connect to Wi-Fi
+  // Connect to Wi-Fi with fallback support
   #ifdef ESP32
     WiFi.setSleep(false);  // Disable sleep for stable connection (ESP32)
   #else
     WiFi.setSleepMode(WIFI_NONE_SLEEP);  // Disable sleep for stable connection (ESP8266)
   #endif
+  
   if (strlen(STATIC_IP) > 0) {
     IPAddress local_IP;
     IPAddress gateway;
@@ -463,26 +464,39 @@ void setup(){
     dns.fromString(STATIC_DNS);
     WiFi.config(local_IP, gateway, subnet, dns);
   }
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-  Serial.println("Connecting to WiFi: " + String(WIFI_SSID));
   
-  int wifiAttempts = 0;
-  const int MAX_WIFI_ATTEMPTS = 20;  // ~10 seconds at 500ms intervals
-  
-  while (WiFi.status() != WL_CONNECTED && wifiAttempts < MAX_WIFI_ATTEMPTS) {
-    delay(500);
-    Serial.print(".");
-    wifiAttempts++;
+  // Try connecting to each WiFi network in order
+  bool wifiConnected = false;
+  for (int netIndex = 0; netIndex < NUM_WIFI_NETWORKS && !wifiConnected; netIndex++) {
+    Serial.println("Attempting WiFi: " + String(wifi_networks[netIndex].ssid));
+    WiFi.begin(wifi_networks[netIndex].ssid, wifi_networks[netIndex].password);
+    
+    int wifiAttempts = 0;
+    const int MAX_WIFI_ATTEMPTS = 20;  // ~10 seconds at 500ms intervals
+    
+    while (WiFi.status() != WL_CONNECTED && wifiAttempts < MAX_WIFI_ATTEMPTS) {
+      delay(500);
+      Serial.print(".");
+      wifiAttempts++;
+    }
+    
+    Serial.println();
+    
+    if (WiFi.status() == WL_CONNECTED) {
+      wifiConnected = true;
+      Serial.println("✅ WiFi connected to: " + String(wifi_networks[netIndex].ssid));
+      Serial.println("IP: " + WiFi.localIP().toString());
+      Serial.println("Signal strength: " + String(WiFi.RSSI()) + " dBm");
+    } else {
+      Serial.println("❌ Failed to connect to " + String(wifi_networks[netIndex].ssid));
+      if (netIndex < NUM_WIFI_NETWORKS - 1) {
+        Serial.println("Trying next network...");
+      }
+    }
   }
   
-  Serial.println();
-  
-  if (WiFi.status() == WL_CONNECTED) {
-    Serial.println("✅ WiFi connected!");
-    Serial.println("IP: " + WiFi.localIP().toString());
-    Serial.println("Signal strength: " + String(WiFi.RSSI()) + " dBm");
-  } else {
-    Serial.println("❌ WiFi connection timeout after " + String(MAX_WIFI_ATTEMPTS * 500) + "ms");
+  if (!wifiConnected) {
+    Serial.println("❌ Failed to connect to any WiFi network");
     Serial.println("Continuing with offline mode - will retry in main loop");
   }
 
