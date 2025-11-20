@@ -2,8 +2,14 @@
 .pio
 .vscode
 
-# Secrets
+# Secrets - NEVER commit these files
 include/secrets.h
+**/secrets.h
+*.key
+*.pem
+*.crt
+.env
+.env.local
 
 # Python
 .venv
