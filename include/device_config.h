@@ -12,7 +12,7 @@ static const int ONE_WIRE_PIN = 4;
 
 // Device location name (appears in InfluxDB, Lambda logs, and can be used in Home Assistant via InfluxDB integration)
 // Examples: "Big Garage", "Bedroom", "Living Room", "Basement", "Attic", etc.
-static const char* DEVICE_LOCATION = "Big Garage";
+static const char* DEVICE_LOCATION = "Main Cottage";
 
 // Optional: Device ID (useful for entity identification in monitoring systems like Home Assistant)
 // If empty, will use chip ID (MAC address)

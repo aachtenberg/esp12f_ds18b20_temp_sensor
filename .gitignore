@@ -28,6 +28,11 @@ build/
 .DS_Store
 Thumbs.db
 
-# AWS CDK
+# Build artifacts
+compile_commands.json
+.clang_format
+.clang-format copy
+
+# AWS CDK (obsolete but kept for reference)
 scripts/cdk.out/
 scripts/cdk/cdk.context.json
