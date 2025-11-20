@@ -1,335 +1,217 @@
-# ESP8266 DS18B20 Temperature Sensor with CloudWatch Logging
+# ESP12F DS18B20 Temperature Sensor - Documentation
 
-A PlatformIO-based ESP8266 firmware that reads temperature from a DS18B20 sensor and logs all data, errors, and diagnostics to **AWS CloudWatch** via a serverless Lambda function.
+This project monitors temperature using ESP8266/ESP32 devices with DS18B20 sensors, sending data to a local Raspberry Pi infrastructure for storage and visualization.
 
-## Features
+## Current Architecture
 
-- 🌡️ **DS18B20 Temperature Readings**: Reads temperature every 30 seconds
-- 📊 **WiFi Web Dashboard**: HTTP endpoints for real-time temperature (`/temperaturec`, `/temperaturef`)
-- 🔐 **CloudWatch Integration**: All device logs (temperature, errors, diagnostics) automatically uploaded to AWS CloudWatch Logs
-- 🚀 **Serverless Architecture**: Uses AWS Lambda + API Gateway (no VPS/MQTT broker required)
-- 🛠️ **Clean Logging**: Centralized log buffering prevents serial spam; all messages captured and sent to CloudWatch
-
-## Hardware
-
-- **ESP8266** (NodeMCU v2 recommended)
-- **DS18B20** Temperature Sensor (1-Wire protocol on GPIO 4)
-- **Micro USB** cable for power/programming
-
-## Setup
-
-### 1. Clone & Configure
-
-```bash
-cd esp12f_ds18b20_temp_sensor
+```
+┌─────────────────┐
+│  ESP8266/ESP32  │  (4 deployed devices)
+│   + DS18B20     │
+└────────┬────────┘
+         │ HTTP (every 15s)
+         │ InfluxDB Line Protocol
+         ▼
+┌─────────────────┐
+│  Raspberry Pi   │  (192.168.0.167)
+│  192.168.0.167  │
+└─────────────────┘
+         │
+    ┌────┴────┬──────────┬─────────────┐
+    ▼         ▼          ▼             ▼
+┌─────────┐ ┌────────┐ ┌─────────┐ ┌──────────┐
+│ InfluxDB│ │Grafana │ │Home Asst│ │Cloudflare│
+│  :8086  │ │ :3000  │ │  :8123  │ │  Tunnel  │
+└─────────┘ └────────┘ └─────────┘ └──────────┘
 ```
 
-### 2. WiFi Credentials
+### Components
 
-Edit `include/secrets.h`:
+- **ESP Devices** (4 deployed):
+  - Big Garage Temperature
+  - Small Garage Temperature
+  - Pump House Temperature
+  - Main Cottage Temperature
 
+- **Raspberry Pi Docker Stack** ([raspberry-pi-docker](https://github.com/aachtenberg/raspberry-pi-docker)):
+  - **InfluxDB 2.7** - Time-series database (primary data storage)
+  - **Grafana** - Dashboards and visualization
+  - **Home Assistant** - Reads HTTP endpoints from ESP devices
+  - **Prometheus Stack** - System monitoring (Prometheus, Loki, Promtail, Node Exporter, cAdvisor)
+  - **Mosquitto** - MQTT broker
+  - **Nginx Proxy Manager** - HTTP → HTTPS reverse proxy
+  - **Cloudflare Tunnel** - Remote access via xgrunt.com
+
+## Quick Start
+
+1. **Hardware Setup**: Connect DS18B20 sensor to ESP device (GPIO 4)
+2. **Configure**: Copy `include/secrets.h.example` to `include/secrets.h` and update credentials
+3. **Build & Flash**: Use scripts in `scripts/` directory
+4. **Verify**: Check InfluxDB for incoming data
+
+See [SETUP.md](SETUP.md) for detailed instructions.
+
+## Documentation Structure
+
+```
+docs/
+├── README.md                    # This file (architecture overview)
+├── SETUP.md                     # Complete setup guide
+├── api/                         # Integration documentation
+│   ├── INFLUXDB_INTEGRATION.md  # InfluxDB Line Protocol setup
+│   └── MQTT_INTEGRATION.md      # MQTT broker integration
+├── guides/                      # How-to guides
+│   ├── DEVICE_FLASHING_QUICK_GUIDE.md
+│   └── TROUBLESHOOTING.md
+├── architecture/                # Technical design docs
+│   ├── CODE_STRUCTURE.md
+│   └── WIFI_FALLBACK.md
+├── reference/                   # Reference material
+│   └── COPILOT_INSTRUCTIONS.md
+└── archive/                     # Legacy/deprecated docs
+    └── AWS_CDK_SETUP.md        # Old AWS CloudWatch setup (no longer used)
+```
+
+## Current Data Flow
+
+### 1. ESP Device Boot
+```
+ESP powers on
+  → Connect to WiFi (with fallback support)
+  → Initialize DS18B20 sensor
+  → Start AsyncWebServer (port 80)
+  → Begin temperature reading loop
+```
+
+### 2. Temperature Reading (Every 15 seconds)
+```
+Read DS18B20 sensor
+  → Convert to °C and °F
+  → Send to InfluxDB via HTTP POST (Line Protocol)
+  → Serve via HTTP endpoints (/temperaturec, /temperaturef)
+  → Log to serial for debugging
+```
+
+### 3. Data Storage
+```
+InfluxDB receives data
+  → Stores in "sensor_data" bucket
+  → Organization: d990ccd978a70382
+  → Retention: configurable (default: infinite)
+```
+
+### 4. Visualization
+```
+Grafana queries InfluxDB
+  → Displays dashboards with temperature trends
+  → Home Assistant reads HTTP endpoints
+  → Remote access via Cloudflare Tunnel (xgrunt.com)
+```
+
+## Configuration Files
+
+### ESP Device Configuration
+
+- **[include/secrets.h](../include/secrets.h)** - WiFi, InfluxDB, and service credentials
+- **[include/device_config.h](../include/device_config.h)** - Device-specific settings (name, location)
+- **[platformio.ini](../platformio.ini)** - Build configuration for ESP8266/ESP32
+
+### Raspberry Pi Configuration
+
+See [raspberry-pi-docker](https://github.com/aachtenberg/raspberry-pi-docker) repository for:
+- Docker Compose configuration
+- InfluxDB setup
+- Grafana dashboards
+- Home Assistant configuration
+
+## Key Features
+
+### Multi-Network WiFi Fallback
+Devices attempt multiple WiFi networks in order (see [WIFI_FALLBACK.md](architecture/WIFI_FALLBACK.md)):
 ```cpp
-static const char* WIFI_SSID = "Your_WiFi_SSID";
-static const char* WIFI_PASSWORD = "Your_WiFi_Password";
+static const WiFiNetwork wifi_networks[NUM_WIFI_NETWORKS] = {
+  {"AA229-2G", "password"},      // Primary
+  {"AA225-2G-OD", "password"},   // Fallback 1
+  {"AASTAR", "password"}         // Fallback 2
+};
 ```
 
-### 3. AWS Lambda Setup
+### Health Monitoring
+- **Exponential Backoff**: Automatic retry with increasing delays on failures
+- **Connection Tracking**: WiFi reconnection counter in InfluxDB tags
+- **Error Logging**: All errors logged to InfluxDB and serial
 
-#### Create Lambda Function
+### Lightweight Web Server
+- **AsyncWebServer**: Non-blocking HTTP server for ESP devices
+- **Endpoints**:
+  - `/` - HTML dashboard with live temperature
+  - `/temperaturec` - Plain text temperature in Celsius
+  - `/temperaturef` - Plain text temperature in Fahrenheit
 
-1. **AWS Console** → **Lambda** → **Create function**
-2. **Name**: `esp-temperature-logger`
-3. **Runtime**: Python 3.11
-4. **Paste this code**:
+## Deployment
 
-```python
-import json
-import logging
-from datetime import datetime
-
-logger = logging.getLogger()
-logger.setLevel(logging.INFO)
-
-def lambda_handler(event, context):
-    try:
-        # Parse incoming JSON from ESP8266
-        body = json.loads(event.get('body', '{}'))
-        
-        device = body.get('device', 'unknown')
-        temp_c = body.get('tempC', 'N/A')
-        temp_f = body.get('tempF', 'N/A')
-        log_count = body.get('logCount', 0)
-        logs = body.get('logs', [])
-        
-        # Log temperature
-        logger.info(f"Device: {device} | Temp: {temp_c}°C / {temp_f}°F")
-        
-        # Log all buffered device messages
-        for log_entry in logs:
-            msg = log_entry.get('msg', '')
-            logger.info(f"Device Log: {msg}")
-        
-        return {
-            'statusCode': 200,
-            'body': json.dumps({
-                'message': f'Logged {log_count} entries successfully',
-                'device': device,
-                'temp': f'{temp_c}°C / {temp_f}°F'
-            })
-        }
-    
-    except Exception as e:
-        logger.error(f"Error: {str(e)}")
-        return {
-            'statusCode': 500,
-            'body': json.dumps({'error': str(e)})
-        }
-```
-
-5. **Click "Deploy"**
-
-#### Create API Gateway
-
-1. In Lambda function, scroll to **Function overview**
-2. Click **+ Add trigger**
-3. Select **API Gateway**
-4. Create new API:
-   - **API type**: REST API
-   - **Security**: API key (optional) or CORS enabled
-   - Click **Create**
-5. **Copy the Invoke URL** (looks like `https://xxxxxxxxxx.execute-api.ca-central-1.amazonaws.com/default`)
-
-#### Update ESP8266 Secrets
-
-Edit `include/secrets.h`:
-
-```cpp
-static const char* LAMBDA_ENDPOINT = "https://YOUR_API_ID.execute-api.ca-central-1.amazonaws.com/default/esp-temperature-logger";
-```
-
-### 4. Build & Upload
-
+### Single Device
 ```bash
-# Activate PlatformIO venv (if using isolated environment)
-source ~/.venvs/platformio/bin/activate
-
-# Build
-platformio run -e nodemcuv2
-
-# Upload
-platformio run -e nodemcuv2 --target upload
-
-# Monitor serial output
-platformio device monitor -p /dev/ttyUSB0 -b 115200
+scripts/flash_device.sh "Device Name" esp8266
 ```
 
-## Usage
-
-### Web Dashboard
-
-Once connected to WiFi, access the device via its local IP:
-
-- **`http://<ESP_IP>/`** - HTML dashboard with live temperature
-- **`http://<ESP_IP>/temperaturec`** - Current temperature in Celsius (plain text)
-- **`http://<ESP_IP>/temperaturef`** - Current temperature in Fahrenheit (plain text)
-
-**Example**:
+### All Devices (Bulk Deployment)
 ```bash
-# Get Celsius temperature
-curl http://192.168.1.100/temperaturec
-# Output: 23.56
-
-# Get Fahrenheit temperature
-curl http://192.168.1.100/temperaturef
-# Output: 74.41
+scripts/deploy_all_devices.sh
 ```
 
-### CloudWatch Logs
-
-View logs in **AWS Console** → **CloudWatch Logs**:
-
-1. **Log Group**: `esp-sensor-logs`
-2. **Log Stream**: `garage-temperature` (or your device name)
-3. **View entries**: All temperature readings, device errors, and diagnostics appear here with timestamps
-
-**Example log entries**:
-```
-Device: Big Garage Temperature | Temp: 23.56°C / 74.41°F
-Device Log: Temperature C: 23.56
-Device Log: Temperature F: 74.41
-Device Log: Logs sent to CloudWatch successfully!
-```
-
-## Logging Architecture
-
-### Device-Side (ESP8266)
-
-- All `logMessage()` calls buffer to a 50-entry circular log
-- Every 30 seconds: temperatures are read and logs sent to Lambda
-- After successful Lambda POST (HTTP 200), log buffer is cleared
-- Serial output includes all logs for debugging
-
-### Server-Side (Lambda)
-
-- Parses JSON payload with temperature, device name, and log entries
-- Writes to CloudWatch Logs using Python's `logging` module
-- CloudWatch automatically timestamps each log entry
-- Logs are retained per your CloudWatch retention policy
-
-## Configuration
-
-### `platformio.ini`
-
-- **Board**: `nodemcuv2` (ESP8266 NodeMCU v2)
-- **Framework**: Arduino ESP8266
-- **Monitor Speed**: 115200 baud
-- **Library Dependencies**:
-  - ESPAsyncTCP 2.0.0
-  - ESPAsyncWebServer 3.6.0
-  - OneWire (GitHub)
-  - DallasTemperature
-  - PubSubClient 2.8.0
-  - ESP8266HTTPClient 1.2
-
-### `include/secrets.h`
-
-Edit credentials here:
-
-```cpp
-// WiFi
-static const char* WIFI_SSID = "Your_SSID";
-static const char* WIFI_PASSWORD = "Your_Password";
-
-// AWS Lambda endpoint
-static const char* LAMBDA_ENDPOINT = "https://YOUR_API.execute-api.ca-central-1.amazonaws.com/default/esp-temperature-logger";
-
-// Optional: MQTT (disabled by default)
-static const char* MQTT_BROKER = "192.168.0.167";
-static const int MQTT_PORT = 1883;
-
-// Optional: InfluxDB Cloud
-static const char* INFLUXDB_URL = "https://us-east-1-1.aws.cloud2.influxdata.com";
-```
+See [guides/DEVICE_FLASHING_QUICK_GUIDE.md](guides/DEVICE_FLASHING_QUICK_GUIDE.md) for detailed flashing instructions.
 
 ## Troubleshooting
 
-### Device not connecting to WiFi
-
-- Check SSID/password in `include/secrets.h`
-- Verify ESP8266 antenna (external or PCB) is in good contact
-- Restart device: `ESP.restart()` in code or power cycle
-
-### Logs not appearing in CloudWatch
-
-1. **Check Lambda execution**: AWS Console → Lambda → `esp-temperature-logger` → **Monitor** tab
-2. **Check API Gateway**: Verify Invoke URL is correct in `secrets.h`
-3. **Check serial output**: Run `platformio device monitor` to see HTTP response codes
-4. **CloudWatch Logs**: Verify log group `esp-sensor-logs` exists and has entries
-
-### HTTP 404 errors from ESP
-
-- Ensure API Gateway **Deploy** was clicked after creating/modifying the function
-- Double-check Invoke URL ends with `/esp-temperature-logger` (or your Lambda resource name)
-
-### Temperature reads as "--"
-
-- Check GPIO 4 connection to DS18B20 data pin
-- Verify OneWire library is correctly included
-- Run `updateTemperatures()` in setup to test sensor immediately
-
-## Optional: Send to InfluxDB Cloud Instead
-
-To also send temperature to InfluxDB Cloud:
-
-1. In `src/main.cpp` loop section, uncomment:
-   ```cpp
-   // sendToInfluxDB();  // Uncomment to also send to InfluxDB
+### Device Not Sending Data
+1. Check WiFi connection (serial monitor shows connection status)
+2. Verify InfluxDB is running: `ssh aachten@192.168.0.167 "docker ps | grep influxdb"`
+3. Check InfluxDB token in `include/secrets.h` matches Pi configuration
+4. Query InfluxDB to see if data is arriving:
+   ```bash
+   influx query 'from(bucket: "sensor_data") |> range(start: -1h)'
    ```
 
-2. Configure `include/secrets.h`:
-   ```cpp
-   static const char* INFLUXDB_URL = "https://us-east-1-1.aws.cloud2.influxdata.com";
-   static const char* INFLUXDB_BUCKET = "sensor_data";
-   static const char* INFLUXDB_TOKEN = "your_token";
-   ```
+### Sensor Reading "85.0°C" or "--"
+- **85.0°C** = Sensor not ready (wait for next reading)
+- **"--"** = Sensor not found (check GPIO 4 wiring)
 
-3. Rebuild and upload
-
-## Optional: CloudWatch Dashboard
-
-To visualize temperature over time in AWS:
-
-1. **AWS Console** → **CloudWatch** → **Dashboards** → **Create dashboard**
-2. Add **Metric** widget with:
-   - **Source**: CloudWatch Logs Insights
-   - **Query**: 
-     ```
-     fields @timestamp, @message | filter @message like /Temp:/ | stats avg(temp) as temp_avg by bin(1m)
-     ```
-
-## Project Structure
-
-```
-esp12f_ds18b20_temp_sensor/
-├── platformio.ini              # PlatformIO configuration
-├── src/
-│   └── main.cpp               # Main firmware (WiFi, DS18B20, Lambda logging)
-├── include/
-│   ├── README                 # Include directory notes
-│   └── secrets.h              # WiFi/AWS credentials (add to .gitignore!)
-├── lib/
-│   ├── OneWire/               # OneWire protocol library
-│   └── DallasTemperature/     # DS18B20 temperature library
-├── test/
-│   └── README                 # Test directory (optional)
-└── README.md                  # This file
+### WiFi Reconnections
+Check reconnection count in InfluxDB data:
+```bash
+influx query 'from(bucket: "sensor_data") |> range(start: -24h) |> filter(fn: (r) => r._field == "wifi_reconnects")'
 ```
 
-## Security Notes
+See [guides/TROUBLESHOOTING.md](guides/TROUBLESHOOTING.md) for more solutions.
 
-⚠️ **Important**:
+## Legacy Documentation
 
-1. **Never commit `include/secrets.h`** to public repos
-   - Add to `.gitignore`: `include/secrets.h`
-   - Use environment variables in CI/CD
+### AWS Integration (Deprecated)
+This project originally used AWS Lambda and CloudWatch for logging. This has been replaced with local InfluxDB.
 
-2. **API Gateway**: Currently allows unauthenticated POST
-   - For production, enable **AWS_IAM** authentication or API keys
+Legacy documentation archived in:
+- [archive/AWS_CDK_SETUP.md](archive/AWS_CDK_SETUP.md) - CloudWatch Dashboard setup (no longer used)
 
-3. **SSL Verification**: ESP8266 disables SSL cert verification (`setInsecure()`)
-   - Safe for internal use; consider certificate pinning for public deployments
-
-## License
-
-This project is provided as-is for personal use. See LICENSE file for details.
+The AWS Lambda endpoint configuration in `include/secrets.h` is commented out and kept for reference only.
 
 ## Contributing
 
-Feel free to fork and submit PRs for:
-- Additional sensor support (humidity, pressure, etc.)
-- Grafana dashboard integration
-- MQTT fallback support
-- OTA firmware updates
+When adding features or fixing bugs:
+1. Test on both ESP8266 and ESP32 platforms
+2. Update documentation if changing configuration or architecture
+3. Follow existing code structure (see [architecture/CODE_STRUCTURE.md](architecture/CODE_STRUCTURE.md))
+4. Ensure serial logging provides useful debug information
 
----
+## Support
 
-## 📚 Credits & References
+- **ESP Project**: This repository
+- **Pi Infrastructure**: [raspberry-pi-docker](https://github.com/aachtenberg/raspberry-pi-docker)
+- **InfluxDB Docs**: https://docs.influxdata.com/influxdb/v2.7/
+- **PlatformIO Docs**: https://docs.platformio.org/
 
-This project is based on the excellent ESP32 DS18B20 temperature sensor tutorial by Random Nerd Tutorials:
+## Credits
 
-- **Tutorial**: [ESP32 DS18B20 Temperature Arduino IDE](https://randomnerdtutorials.com/esp32-ds18b20-temperature-arduino-ide/)
-- **Author**: Rui Santos
-- **Platform**: Random Nerd Tutorials
+Based on [ESP32 DS18B20 Temperature Tutorial](https://randomnerdtutorials.com/esp32-ds18b20-temperature-arduino-ide/) by Random Nerd Tutorials.
 
-The original tutorial provides the foundation for the DS18B20 sensor integration and basic ESP32/ESP8266 setup used in this project. This project extends the original work to support multiple boards, cloud logging to AWS Lambda and InfluxDB Cloud, and production-grade reliability features like exponential backoff and health monitoring.
-
----
-
-**Happy Monitoring!** 🎉
-
-If you have questions or issues, check the serial monitor output first:
-```bash
-platformio device monitor -p /dev/ttyUSB0 -b 115200
-```
-
-````
+Extended with multi-board support, cloud logging, exponential backoff, and production reliability features.
