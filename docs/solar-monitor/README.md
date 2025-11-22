@@ -4,6 +4,8 @@ WiFi-enabled monitoring system for Victron Energy solar equipment using ESP32 mi
 
 **Status:** Planning phase
 
+> **Full Implementation Details:** See [IMPLEMENTATION_CONTEXT.md](IMPLEMENTATION_CONTEXT.md) for complete technical specifications, C++ class designs, and code architecture.
+
 ## Features (Planned)
 
 - Real-time battery monitoring (Victron SmartShunt)
@@ -15,13 +17,15 @@ WiFi-enabled monitoring system for Victron Energy solar equipment using ESP32 mi
 
 ## Hardware Requirements
 
-- ESP32-WROOM-32 Development Board
-- Victron SmartShunt 500A (or any Victron device with VE.Direct)
-- Victron SmartSolar MPPT (or any VE.Direct-compatible charge controller)
-- 2x VE.Direct to Serial cables
-- 12V-to-5V power supply (waterproof recommended)
+| Component | Model | Notes |
+|-----------|-------|-------|
+| Microcontroller | ESP32-WROOM-32 | Dual UART for simultaneous monitoring |
+| Battery Monitor | Victron SmartShunt SHU050150050 | 500A/50mV shunt |
+| Charge Controller | Victron SmartSolar MPPT SCC110050210 | 100V/50A |
+| VE.Direct Cables | ASS030530xxx | 2x required |
+| Power Supply | 12V-to-5V 3A Waterproof | Amazon.ca |
 
-**Estimated Cost:** ~$60-70 (excluding Victron equipment)
+**Estimated Cost:** ~$66 (excluding Victron equipment)
 
 ## VE.Direct Protocol
 
@@ -61,10 +65,12 @@ ESP32-WROOM-32
 
 ## API Endpoints (Planned)
 
-- `GET /` - Web dashboard
-- `GET /api/data` - All data (JSON)
-- `GET /api/shunt` - SmartShunt data only (JSON)
-- `GET /api/mppt` - MPPT data only (JSON)
+| Endpoint | Description |
+|----------|-------------|
+| `GET /` | Simple HTML dashboard |
+| `GET /api/battery` | SmartShunt data (JSON) |
+| `GET /api/solar` | MPPT data (JSON) |
+| `GET /api/system` | Combined system status (JSON) |
 
 ### Example JSON Response
 
@@ -97,6 +103,7 @@ This project will integrate with the same infrastructure as the temperature sens
 
 ## Documentation
 
+- [IMPLEMENTATION_CONTEXT.md](IMPLEMENTATION_CONTEXT.md) - **Complete technical spec** (C++ classes, code architecture)
 - [Bill of Materials](BOM.md) - Component list with prices
 - [Wiring Guide](WIRING.md) - Connection instructions
 - [Quick Reference](QUICK_REFERENCE.md) - Pin connections at a glance
