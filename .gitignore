@@ -32,7 +32,3 @@ Thumbs.db
 compile_commands.json
 .clang_format
 .clang-format copy
-
-# AWS CDK (obsolete but kept for reference)
-scripts/cdk.out/
-scripts/cdk/cdk.context.json

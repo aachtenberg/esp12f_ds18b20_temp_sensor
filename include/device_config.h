@@ -10,7 +10,7 @@
 // Data wire is connected to GPIO 4 on ESP8266/ESP32
 static const int ONE_WIRE_PIN = 4;
 
-// Device location name (appears in InfluxDB, Lambda logs, and can be used in Home Assistant via InfluxDB integration)
+// Device location name (appears in InfluxDB and can be used in Home Assistant via InfluxDB integration)
 // Examples: "Big Garage", "Bedroom", "Living Room", "Basement", "Attic", etc.
 static const char* DEVICE_LOCATION = "Main Cottage";
 
@@ -34,7 +34,7 @@ static const unsigned long TEMPERATURE_READ_INTERVAL_MS = 15000;
 static const int MAX_WIFI_ATTEMPTS = 20;
 static const int HTTP_TIMEOUT_MS = 10000;
 
-// Exponential backoff constants for cloud operations (Lambda, InfluxDB)
+// Exponential backoff constants for cloud operations (InfluxDB)
 static const unsigned long MIN_BACKOFF_MS = 1000;      // 1 second
 static const unsigned long MAX_BACKOFF_MS = 300000;    // 5 minutes
 static const int MAX_CONSECUTIVE_FAILURES = 10;
