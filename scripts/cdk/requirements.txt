@@ -1,5 +1,0 @@
-# AWS CDK Requirements for Temperature Logger Dashboard
-# Install with: pip install -r cdk/requirements.txt
-
-aws-cdk-lib>=1.180.0
-constructs>=10.0.0
