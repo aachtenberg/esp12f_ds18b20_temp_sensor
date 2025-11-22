@@ -1,25 +1,37 @@
-# ESP12F DS18B20 Temperature Sensor
+# ESP Sensor Hub
 
-Multi-board temperature sensor project supporting ESP32 and ESP8266 with local InfluxDB data logging to Raspberry Pi.
+A collection of ESP32/ESP8266 IoT sensor projects with local InfluxDB data logging to Raspberry Pi.
+
+## Projects
+
+### Temperature Sensor (Active)
+Multi-location DS18B20 temperature monitoring with WiFi connectivity.
+- **Hardware**: ESP8266/ESP32 + DS18B20
+- **Status**: 4 devices deployed
+- **PCB**: [USB-powered board](docs/pcb_design/usb-powered/) (v1.0 ordered)
+
+### Solar Monitor (Planned)
+ESP32 monitoring for Victron solar equipment via VE.Direct protocol.
+- **Hardware**: ESP32 + Victron SmartShunt + SmartSolar MPPT
+- **Status**: Planning phase
 
 ## System Overview
 
-This project consists of two repositories:
-- **This repo** - ESP8266/ESP32 firmware for temperature sensors
-- **[raspberry-pi-docker](https://github.com/aachtenberg/raspberry-pi-docker)** - Raspberry Pi infrastructure (InfluxDB, Grafana, Home Assistant, etc.)
+All sensor projects share common infrastructure:
+- **[raspberry-pi-docker](https://github.com/aachtenberg/raspberry-pi-docker)** - Raspberry Pi backend (InfluxDB, Grafana, Home Assistant)
 
 ### Architecture
 ```
-ESP Devices (4 deployed) → Raspberry Pi (192.168.0.167)
-                          ├── InfluxDB (data storage)
-                          ├── Grafana (dashboards)
-                          ├── Home Assistant (automation)
-                          └── Cloudflare Tunnel (remote access)
+ESP Devices → Raspberry Pi (192.168.0.167)
+              ├── InfluxDB (data storage)
+              ├── Grafana (dashboards)
+              ├── Home Assistant (automation)
+              └── Cloudflare Tunnel (remote access)
 ```
 
 See [docs/README.md](docs/README.md) for complete architecture details.
 
-## Quick Start
+## Quick Start (Temperature Sensor)
 
 1. **Configure Secrets**: Create `include/secrets.h` from template:
    ```bash
@@ -45,7 +57,7 @@ For detailed setup instructions, see [docs/SETUP.md](docs/SETUP.md).
 ## Project Structure
 
 ```
-├── src/                    # Main application code
+├── src/                    # Temperature sensor firmware
 ├── include/                # Header files (config, secrets)
 ├── lib/                    # Local libraries (OneWire, DallasTemperature)
 ├── test/                   # Test files
@@ -93,3 +105,9 @@ scripts/flash_device.sh "Device Name" esp32
 ```
 
 See [docs/SETUP.md](docs/SETUP.md) for detailed build instructions.
+
+## Related Projects
+
+- **[raspberry-pi-docker](https://github.com/aachtenberg/raspberry-pi-docker)** - Centralized data collection infrastructure
+
+All IoT sensor projects follow similar patterns and integrate with the Raspberry Pi data collection system.
