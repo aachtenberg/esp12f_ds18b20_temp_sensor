@@ -1,6 +1,11 @@
-# ESP12F DS18B20 Temperature Sensor - Documentation
+# ESP Sensor Hub - Documentation
 
-This project monitors temperature using ESP8266/ESP32 devices with DS18B20 sensors, sending data to a local Raspberry Pi infrastructure for storage and visualization.
+This repository contains ESP32/ESP8266 IoT sensor projects that send data to a local Raspberry Pi infrastructure for storage and visualization.
+
+## Current Projects
+
+- **Temperature Sensor** - DS18B20 temperature monitoring (4 devices deployed)
+- **Solar Monitor** - Victron equipment monitoring via VE.Direct (planned)
 
 ## Current Architecture
 
