@@ -13,7 +13,7 @@
 #define VICTRON_MPPT_H
 
 #include <Arduino.h>
-#include <HardwareSerial.h>
+#include <Stream.h>
 
 // Charge state enumeration
 enum class ChargeState : uint8_t {
@@ -31,9 +31,9 @@ class VictronMPPT {
 public:
     /**
      * Constructor
-     * @param serial Pointer to HardwareSerial instance (UART1 recommended)
+     * @param serial Pointer to Stream instance (HardwareSerial or SoftwareSerial)
      */
-    VictronMPPT(HardwareSerial* serial);
+    VictronMPPT(Stream* serial);
 
     /**
      * Initialize the MPPT connection
@@ -69,7 +69,7 @@ public:
     unsigned long getLastUpdate() const; // millis() of last valid update
 
 private:
-    HardwareSerial* _serial;
+    Stream* _serial;
 
     // Parse a single VE.Direct line
     void parseLine(const String& line);

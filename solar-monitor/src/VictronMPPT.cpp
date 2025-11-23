@@ -6,7 +6,7 @@
 
 #include "VictronMPPT.h"
 
-VictronMPPT::VictronMPPT(HardwareSerial* serial)
+VictronMPPT::VictronMPPT(Stream* serial)
     : _serial(serial)
     , _batt_voltage_mv(0)
     , _charge_current_ma(0)
