@@ -2,9 +2,10 @@
 
 ## Overview
 
-The ESP32 Solar Monitor connects to two Victron devices via VE.Direct protocol:
+The ESP32 Solar Monitor connects to three Victron devices via VE.Direct protocol:
 1. **SmartShunt** - Battery monitoring (voltage, current, SOC)
-2. **SmartSolar MPPT** - Solar charge controller status
+2. **SmartSolar MPPT 1** - First solar charge controller
+3. **SmartSolar MPPT 2** - Second solar charge controller
 
 ## VE.Direct Cable Pinout
 
@@ -28,9 +29,10 @@ VE.Direct uses a 4-pin JST-PH connector (similar to 3.5mm audio jack):
 │                   ESP32-WROOM-32                    │
 │                                                     │
 │  GPIO 16 (UART2 RX) ←── SmartShunt TX (yellow)     │
-│  GPIO 19 (UART1 RX) ←── MPPT TX (yellow)           │
-│  3.3V ─────────────────→ VE.Direct VCC (both)      │
-│  GND ──────────────────→ VE.Direct GND (both)      │
+│  GPIO 19 (UART1 RX) ←── MPPT1 TX (yellow)          │
+│  GPIO 18 (SoftSerial) ←── MPPT2 TX (yellow)        │
+│  3.3V ─────────────────→ VE.Direct VCC (all 3)     │
+│  GND ──────────────────→ VE.Direct GND (all 3)     │
 │                                                     │
 │  VIN ←── 5V from 12V-to-5V converter               │
 │  GND ←── Ground from converter                      │
@@ -41,10 +43,11 @@ VE.Direct uses a 4-pin JST-PH connector (similar to 3.5mm audio jack):
 
 | ESP32 Pin | Connection | Notes |
 |-----------|------------|-------|
-| GPIO 16 | SmartShunt TX | UART2 RX |
-| GPIO 19 | MPPT TX | UART1 RX |
-| 3.3V | VE.Direct VCC (both) | Powers VE.Direct interface |
-| GND | VE.Direct GND (both) | Common ground |
+| GPIO 16 | SmartShunt TX | UART2 RX (Hardware Serial) |
+| GPIO 19 | MPPT1 TX | UART1 RX (Hardware Serial) |
+| GPIO 18 | MPPT2 TX | SoftwareSerial RX |
+| 3.3V | VE.Direct VCC (all 3) | Powers VE.Direct interface |
+| GND | VE.Direct GND (all 3) | Common ground |
 | VIN | 5V power supply | From 12V-to-5V converter |
 
 ## Power Supply Wiring
@@ -72,13 +75,19 @@ Cut the VE.Direct cables and identify wires:
 2. Connect SmartShunt VE.Direct GND (black) → ESP32 GND
 3. Connect SmartShunt VE.Direct VCC (red) → ESP32 3.3V
 
-### 3. Connect MPPT
+### 3. Connect MPPT1
 
-1. Connect MPPT VE.Direct TX (yellow) → ESP32 GPIO 19
-2. Connect MPPT VE.Direct GND (black) → ESP32 GND
-3. Connect MPPT VE.Direct VCC (red) → ESP32 3.3V
+1. Connect MPPT1 VE.Direct TX (yellow) → ESP32 GPIO 19
+2. Connect MPPT1 VE.Direct GND (black) → ESP32 GND
+3. Connect MPPT1 VE.Direct VCC (red) → ESP32 3.3V
 
-### 4. Power the ESP32
+### 4. Connect MPPT2
+
+1. Connect MPPT2 VE.Direct TX (yellow) → ESP32 GPIO 18
+2. Connect MPPT2 VE.Direct GND (black) → ESP32 GND
+3. Connect MPPT2 VE.Direct VCC (red) → ESP32 3.3V
+
+### 5. Power the ESP32
 
 1. Connect 12V battery positive → inline fuse → 12V-to-5V converter input (+)
 2. Connect 12V battery negative → 12V-to-5V converter input (-)
@@ -101,10 +110,15 @@ Before powering on:
 - Verify VE.Direct cable is plugged in firmly
 - Check SmartShunt settings (VE.Direct must be enabled)
 
-### No Data from MPPT
+### No Data from MPPT1
 - Check GPIO 19 connection
 - Verify VE.Direct cable connection
 - Some MPPTs need VE.Direct enabled in settings
+
+### No Data from MPPT2
+- Check GPIO 18 connection
+- Verify VE.Direct cable connection
+- SoftwareSerial is used for MPPT2; ensure no other code conflicts with GPIO 18
 
 ### ESP32 Not Powering On
 - Check fuse
