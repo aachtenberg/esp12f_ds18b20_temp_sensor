@@ -14,12 +14,13 @@ PlatformIO firmware for ESP32-based solar monitoring using Victron VE.Direct pro
 ## Quick Start
 
 1. Copy `include/secrets.h.example` to `include/secrets.h`
-2. Edit `secrets.h` with your WiFi credentials
+2. Edit `secrets.h` with your InfluxDB credentials
 3. Build and upload:
    ```bash
    pio run --target upload
    pio device monitor
    ```
+4. **Configure WiFi**: On first boot (or double-reset within 3 seconds), connect to the "Solar-Monitor-Setup" AP and configure WiFi via captive portal
 
 ## API Endpoints
 

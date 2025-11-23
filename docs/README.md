@@ -50,9 +50,10 @@ This repository contains ESP32/ESP8266 IoT sensor projects that send data to a l
 ## Quick Start
 
 1. **Hardware Setup**: Connect DS18B20 sensor to ESP device (GPIO 4)
-2. **Configure**: Copy `include/secrets.h.example` to `include/secrets.h` and update credentials
+2. **Configure InfluxDB**: Copy `include/secrets.h.example` to `include/secrets.h` and update InfluxDB credentials
 3. **Build & Flash**: Use scripts in `scripts/` directory
-4. **Verify**: Check InfluxDB for incoming data
+4. **Configure WiFi**: On first boot, connect to device's AP and configure WiFi via captive portal
+5. **Verify**: Check InfluxDB for incoming data
 
 See [SETUP.md](SETUP.md) for detailed instructions.
 
@@ -88,9 +89,10 @@ docs/
 ### 1. ESP Device Boot
 ```
 ESP powers on
-  → Connect to WiFi (with fallback support)
+  → Check for double-reset (enter config portal if detected)
+  → Connect to WiFi via WiFiManager (auto-connect or captive portal)
   → Initialize DS18B20 sensor
-  → Start AsyncWebServer (port 80)
+  → Start WebServer (port 80)
   → Begin temperature reading loop
 ```
 
@@ -137,27 +139,25 @@ See [raspberry-pi-docker](https://github.com/aachtenberg/raspberry-pi-docker) re
 
 ## Key Features
 
-### Multi-Network WiFi Fallback
-Devices attempt multiple WiFi networks in order (see [WIFI_FALLBACK.md](architecture/WIFI_FALLBACK.md)):
-```cpp
-static const WiFiNetwork wifi_networks[NUM_WIFI_NETWORKS] = {
-  {"AA229-2G", "password"},      // Primary
-  {"AA225-2G-OD", "password"},   // Fallback 1
-  {"AASTAR", "password"}         // Fallback 2
-};
-```
+### WiFiManager with Double-Reset Detection
+WiFi credentials are managed via captive portal, not hardcoded:
+- On first boot, device creates an AP (e.g., "Temp-Big-Garage-Setup")
+- Connect to AP and configure WiFi via web interface
+- **To reconfigure**: Double-reset within 3 seconds to enter config portal
+- No timeout - devices retry WiFi forever (suitable for weak signal areas)
 
 ### Health Monitoring
-- **Exponential Backoff**: Automatic retry with increasing delays on failures
-- **Connection Tracking**: WiFi reconnection counter in InfluxDB tags
-- **Error Logging**: All errors logged to InfluxDB and serial
+- **Connection Tracking**: WiFi reconnection counter
+- **Error Logging**: Sensor and InfluxDB failures tracked
+- **Health Endpoint**: `/health` returns JSON device status
 
 ### Lightweight Web Server
-- **AsyncWebServer**: Non-blocking HTTP server for ESP devices
+- **WebServer**: Standard HTTP server for ESP devices
 - **Endpoints**:
   - `/` - HTML dashboard with live temperature
   - `/temperaturec` - Plain text temperature in Celsius
   - `/temperaturef` - Plain text temperature in Fahrenheit
+  - `/health` - JSON health/metrics endpoint
 
 ## Deployment
 
@@ -179,20 +179,15 @@ See [guides/DEVICE_FLASHING_QUICK_GUIDE.md](guides/DEVICE_FLASHING_QUICK_GUIDE.m
 1. Check WiFi connection (serial monitor shows connection status)
 2. Verify InfluxDB is running: `ssh aachten@192.168.0.167 "docker ps | grep influxdb"`
 3. Check InfluxDB token in `include/secrets.h` matches Pi configuration
-4. Query InfluxDB to see if data is arriving:
-   ```bash
-   influx query 'from(bucket: "sensor_data") |> range(start: -1h)'
-   ```
+
+### WiFi Not Connecting
+- **Double-reset** the device to enter configuration mode
+- Connect to device's AP and reconfigure WiFi
+- Check serial monitor for connection status
 
 ### Sensor Reading "85.0°C" or "--"
 - **85.0°C** = Sensor not ready (wait for next reading)
 - **"--"** = Sensor not found (check GPIO 4 wiring)
-
-### WiFi Reconnections
-Check reconnection count in InfluxDB data:
-```bash
-influx query 'from(bucket: "sensor_data") |> range(start: -24h) |> filter(fn: (r) => r._field == "wifi_reconnects")'
-```
 
 See [guides/TROUBLESHOOTING.md](guides/TROUBLESHOOTING.md) for more solutions.
 
