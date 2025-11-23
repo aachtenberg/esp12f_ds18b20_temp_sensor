@@ -25,10 +25,19 @@
 #include <ArduinoJson.h>
 #include <HTTPClient.h>
 #include <SoftwareSerial.h>
+#include <WiFiManager.h>
+#include <ESP_DoubleResetDetector.h>
 
 #include "VictronSmartShunt.h"
 #include "VictronMPPT.h"
 #include "secrets.h"
+
+// Double Reset Detector configuration
+#define DRD_TIMEOUT 3           // Seconds to wait for second reset
+#define DRD_ADDRESS 0           // EEPROM address for ESP32
+
+// Create Double Reset Detector instance
+DoubleResetDetector* drd;
 
 // ============================================================================
 // Configuration
@@ -144,6 +153,9 @@ void setup() {
 // ============================================================================
 
 void loop() {
+    // Must call drd->loop() to keep double reset detection working
+    drd->loop();
+
     // Update device data (non-blocking)
     smartShunt.update();
     mppt1.update();
@@ -169,33 +181,75 @@ void loop() {
 }
 
 // ============================================================================
-// WiFi Setup
+// WiFi Setup with WiFiManager and Double Reset Detection
 // ============================================================================
 
 void setupWiFi() {
-    Serial.print("[WiFi] Connecting to ");
-    Serial.print(WIFI_SSID);
+    // Initialize Double Reset Detector
+    drd = new DoubleResetDetector(DRD_TIMEOUT, DRD_ADDRESS);
+
+    // Create WiFiManager instance
+    WiFiManager wm;
+
+    // Set custom AP name for config portal
+    const char* apName = "SolarMonitor-Setup";
+
+    // Don't use timeout - we want to keep retrying forever in weak WiFi zones
+    // User must double-reset to enter config mode
+    wm.setConnectTimeout(0);
 
     WiFi.mode(WIFI_STA);
-    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
 
-    int attempts = 0;
-    while (WiFi.status() != WL_CONNECTED && attempts < 30) {
-        delay(500);
-        Serial.print(".");
-        attempts++;
+    // Check for double reset - enter config portal if detected
+    if (drd->detectDoubleReset()) {
+        Serial.println();
+        Serial.println("========================================");
+        Serial.println("  DOUBLE RESET DETECTED");
+        Serial.println("  Starting WiFi Configuration Portal");
+        Serial.println("========================================");
+        Serial.println();
+        Serial.print("[WiFi] Connect to AP: ");
+        Serial.println(apName);
+        Serial.println("[WiFi] Then open http://192.168.4.1 in browser");
+        Serial.println();
+
+        // Start config portal (blocking - waits until configured)
+        if (!wm.startConfigPortal(apName)) {
+            Serial.println("[WiFi] Failed to connect after config portal");
+            Serial.println("[WiFi] Restarting...");
+            delay(3000);
+            ESP.restart();
+        }
+    } else {
+        // Normal boot - try to connect with saved credentials
+        Serial.println("[WiFi] Normal boot - attempting connection...");
+        Serial.println("[WiFi] (Double-reset within 3 seconds to enter config mode)");
+        Serial.println();
+
+        // Try to auto-connect with saved credentials
+        // If no saved credentials, will start config portal
+        if (!wm.autoConnect(apName)) {
+            Serial.println("[WiFi] Failed to connect");
+            Serial.println("[WiFi] Running in offline mode - double-reset to configure");
+        }
     }
 
+    // Print connection status
     if (WiFi.status() == WL_CONNECTED) {
-        Serial.println(" Connected!");
+        Serial.println();
+        Serial.println("========================================");
+        Serial.println("  WiFi Connected!");
+        Serial.println("========================================");
+        Serial.print("[WiFi] SSID: ");
+        Serial.println(WiFi.SSID());
         Serial.print("[WiFi] IP Address: ");
         Serial.println(WiFi.localIP());
         Serial.print("[WiFi] Signal Strength: ");
         Serial.print(WiFi.RSSI());
         Serial.println(" dBm");
+        Serial.println();
     } else {
-        Serial.println(" FAILED!");
-        Serial.println("[WiFi] Running in offline mode - web interface unavailable");
+        Serial.println("[WiFi] Not connected - running in offline mode");
     }
 }
 
