@@ -5,10 +5,11 @@ A collection of ESP32/ESP8266 IoT sensor projects with local InfluxDB data loggi
 ## Projects
 
 ### Temperature Sensor (Active)
-Multi-location DS18B20 temperature monitoring with WiFi connectivity.
+Multi-location DS18B20 temperature monitoring with WiFi connectivity and comprehensive event logging.
 - **Hardware**: ESP8266/ESP32 + DS18B20
 - **Status**: 4 devices deployed
 - **PCB**: [USB-powered board](docs/pcb_design/usb-powered/) (v1.0 ordered)
+- **Features**: Temperature logging, device monitoring, error tracking, configuration auditing
 
 ### Solar Monitor (Planned)
 ESP32 monitoring for Victron solar equipment via VE.Direct protocol.
@@ -85,6 +86,7 @@ For detailed setup instructions, see [docs/SETUP.md](docs/SETUP.md).
 - [Architecture Overview](docs/README.md) - Complete system architecture and data flow
 - [Secrets Setup Guide](docs/guides/SECRETS_SETUP.md) - **Configure InfluxDB credentials**
 - [Full Setup Guide](docs/SETUP.md) - Detailed setup instructions
+- [Event Logging](docs/EVENT_LOGGING.md) - **Device monitoring and diagnostics** - Track boots, errors, config changes
 - [Code Structure](docs/architecture/CODE_STRUCTURE.md) - Technical implementation details
 - [Device Flashing](docs/guides/) - How to flash and deploy devices
 - [API Integration](docs/api/) - InfluxDB and MQTT integration guides
