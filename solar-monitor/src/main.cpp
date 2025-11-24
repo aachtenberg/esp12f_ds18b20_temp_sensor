@@ -28,6 +28,15 @@
 #include <WiFiManager.h>
 #include <ESP_DoubleResetDetector.h>
 
+// Filesystem for device name storage
+#ifdef ESP32
+  #include <SPIFFS.h>
+  #define FILESYSTEM SPIFFS
+#else
+  #include <LittleFS.h>
+  #define FILESYSTEM LittleFS
+#endif
+
 #include "VictronSmartShunt.h"
 #include "VictronMPPT.h"
 #include "secrets.h"
@@ -38,6 +47,10 @@
 
 // Create Double Reset Detector instance
 DoubleResetDetector* drd;
+
+// Device name storage
+char deviceName[40] = "Solar Monitor";
+const char* DEVICE_NAME_FILE = "/device_name.txt";
 
 // ============================================================================
 // Configuration
@@ -84,6 +97,9 @@ unsigned long bootTime = 0;
 // Function Declarations
 // ============================================================================
 
+void loadDeviceName();
+void saveDeviceName(const char* name);
+void sendEventToInfluxDB(const String& eventType, const String& message, const String& severity = "info");
 void setupWiFi();
 void setupWebServer();
 void handleRoot();
@@ -99,9 +115,97 @@ void sendDataToInfluxDB();
 
 // Data sending interval (ms)
 #define INFLUXDB_SEND_INTERVAL 30000  // Send data every 30 seconds
+#define HTTP_TIMEOUT_MS 5000          // HTTP timeout for InfluxDB requests
 
 // Status tracking
 unsigned long lastInfluxDBSend = 0;
+int influxDBFailureCount = 0;
+
+// ============================================================================
+// Device Name Management
+// ============================================================================
+
+void loadDeviceName() {
+    if (!FILESYSTEM.begin()) {
+        Serial.println("[FS] Failed to mount filesystem");
+        return;
+    }
+
+    if (FILESYSTEM.exists(DEVICE_NAME_FILE)) {
+        File file = FILESYSTEM.open(DEVICE_NAME_FILE, "r");
+        if (file) {
+            String name = file.readStringUntil('\n');
+            name.trim();
+            if (name.length() > 0 && name.length() < sizeof(deviceName)) {
+                strncpy(deviceName, name.c_str(), sizeof(deviceName) - 1);
+                deviceName[sizeof(deviceName) - 1] = '\0';
+                Serial.print("[FS] Loaded device name: ");
+                Serial.println(deviceName);
+            }
+            file.close();
+        }
+    } else {
+        Serial.println("[FS] No saved device name, using default");
+    }
+}
+
+void saveDeviceName(const char* name) {
+    if (!FILESYSTEM.begin()) {
+        Serial.println("[FS] Failed to mount filesystem");
+        return;
+    }
+
+    File file = FILESYSTEM.open(DEVICE_NAME_FILE, "w");
+    if (file) {
+        file.println(name);
+        file.close();
+        Serial.print("[FS] Saved device name: ");
+        Serial.println(name);
+    } else {
+        Serial.println("[FS] Failed to save device name");
+    }
+}
+
+// ============================================================================
+// Event Logging to InfluxDB
+// ============================================================================
+
+void sendEventToInfluxDB(const String& eventType, const String& message, const String& severity) {
+    if (WiFi.status() != WL_CONNECTED) {
+        return;  // Skip if WiFi not connected
+    }
+
+    HTTPClient http;
+    http.setTimeout(HTTP_TIMEOUT_MS);
+
+    String url = String(INFLUXDB_URL) + "/api/v2/write?org=" + INFLUXDB_ORG + "&bucket=" + INFLUXDB_BUCKET;
+    http.begin(url);
+    http.addHeader("Authorization", "Token " + String(INFLUXDB_TOKEN));
+    http.addHeader("Content-Type", "text/plain; charset=utf-8");
+
+    // Replace spaces with underscores in device name for tag value
+    String deviceTag = String(deviceName);
+    deviceTag.replace(" ", "_");
+
+    // Build line protocol: measurement,tags fields
+    String data = "device_events,";
+    data += "device=" + deviceTag + ",";
+    data += "board=esp32,";
+    data += "event_type=" + eventType + ",";
+    data += "severity=" + severity + " ";
+    data += "message=\"" + message + "\",";
+    data += "value=1";
+
+    int httpCode = http.POST(data);
+    
+    if (httpCode == 204 || httpCode == 200) {
+        Serial.println("[Event] Logged: " + eventType + " - " + message);
+    } else {
+        Serial.printf("[Event] Failed to log: %d\n", httpCode);
+    }
+
+    http.end();
+}
 
 // ============================================================================
 // Setup
@@ -119,6 +223,9 @@ void setup() {
     Serial.println();
 
     bootTime = millis();
+
+    // Load device name from filesystem
+    loadDeviceName();
 
     // Initialize VE.Direct serial ports (RX only, TX pin = -1)
     Serial.println("[UART] Initializing SmartShunt on GPIO 16...");
@@ -141,6 +248,28 @@ void setup() {
     // Setup web server
     setupWebServer();
 
+    // Log device boot event
+    String resetReason = "Unknown";
+    #ifdef ESP32
+        esp_reset_reason_t reason = esp_reset_reason();
+        switch(reason) {
+            case ESP_RST_POWERON: resetReason = "Power On"; break;
+            case ESP_RST_EXT: resetReason = "External Reset"; break;
+            case ESP_RST_SW: resetReason = "Software Reset"; break;
+            case ESP_RST_PANIC: resetReason = "Panic/Exception"; break;
+            case ESP_RST_INT_WDT: resetReason = "Watchdog"; break;
+            case ESP_RST_TASK_WDT: resetReason = "Task Watchdog"; break;
+            case ESP_RST_WDT: resetReason = "Other Watchdog"; break;
+            case ESP_RST_DEEPSLEEP: resetReason = "Deep Sleep"; break;
+            case ESP_RST_BROWNOUT: resetReason = "Brownout"; break;
+            case ESP_RST_SDIO: resetReason = "SDIO"; break;
+            default: resetReason = "Unknown"; break;
+        }
+    #endif
+    String bootMsg = "Device started - Reset reason: " + resetReason + 
+                     ", Uptime: 0s, Free heap: " + String(ESP.getFreeHeap()) + " bytes";
+    sendEventToInfluxDB("device_boot", bootMsg, "info");
+
     Serial.println();
     Serial.println("========================================");
     Serial.println("     Setup Complete");
@@ -156,10 +285,62 @@ void loop() {
     // Must call drd->loop() to keep double reset detection working
     drd->loop();
 
-    // Update device data (non-blocking)
+    // Check WiFi connection and log reconnects
+    static int reconnectCount = 0;
+    static bool wasConnected = false;
+    bool isConnected = (WiFi.status() == WL_CONNECTED);
+    
+    if (!isConnected && wasConnected) {
+        // WiFi disconnected
+        reconnectCount++;
+        // Log every 5th reconnect attempt to avoid spam
+        if (reconnectCount % 5 == 1) {
+            String msg = "WiFi disconnected, reconnect attempt #" + String(reconnectCount);
+            sendEventToInfluxDB("wifi_reconnect", msg, "warning");
+        }
+    } else if (isConnected && !wasConnected) {
+        // WiFi reconnected
+        reconnectCount = 0;
+    }
+    wasConnected = isConnected;
+
+    // Update device data (non-blocking) and log errors
+    static unsigned long lastSmartShuntData = 0;
+    static unsigned long lastMppt1Data = 0;
+    static unsigned long lastMppt2Data = 0;
+    static bool smartShuntErrorLogged = false;
+    static bool mppt1ErrorLogged = false;
+    static bool mppt2ErrorLogged = false;
+    
     smartShunt.update();
     mppt1.update();
     mppt2.update();
+    
+    // Log sensor errors after 60 seconds of no data (log once until recovered)
+    unsigned long now = millis();
+    if (smartShunt.isDataValid()) {
+        lastSmartShuntData = now;
+        smartShuntErrorLogged = false;
+    } else if (!smartShuntErrorLogged && now - lastSmartShuntData > 60000) {
+        sendEventToInfluxDB("sensor_error", "SmartShunt no data for 60+ seconds", "error");
+        smartShuntErrorLogged = true;
+    }
+    
+    if (mppt1.isDataValid()) {
+        lastMppt1Data = now;
+        mppt1ErrorLogged = false;
+    } else if (!mppt1ErrorLogged && now - lastMppt1Data > 60000) {
+        sendEventToInfluxDB("sensor_error", "MPPT1 no data for 60+ seconds", "error");
+        mppt1ErrorLogged = true;
+    }
+    
+    if (mppt2.isDataValid()) {
+        lastMppt2Data = now;
+        mppt2ErrorLogged = false;
+    } else if (!mppt2ErrorLogged && now - lastMppt2Data > 60000) {
+        sendEventToInfluxDB("sensor_error", "MPPT2 no data for 60+ seconds", "error");
+        mppt2ErrorLogged = true;
+    }
 
     // Handle web requests
     server.handleClient();
@@ -193,6 +374,22 @@ void setupWiFi() {
 
     // Set custom AP name for config portal
     const char* apName = "SolarMonitor-Setup";
+    
+    // Add device name parameter
+    WiFiManagerParameter customDeviceName("device_name", "Device Name", deviceName, sizeof(deviceName));
+    wm.addParameter(&customDeviceName);
+    
+    // Track if we need to save config
+    bool shouldSaveConfig = false;
+    String oldDeviceName = String(deviceName);
+    
+    // Set save config callback for both modes
+    wm.setSaveConfigCallback([&shouldSaveConfig]() {
+        shouldSaveConfig = true;
+    });
+    wm.setSaveParamsCallback([&shouldSaveConfig]() {
+        shouldSaveConfig = true;
+    });
 
     // Don't use timeout - we want to keep retrying forever in weak WiFi zones
     // User must double-reset to enter config mode
@@ -220,6 +417,24 @@ void setupWiFi() {
             delay(3000);
             ESP.restart();
         }
+        
+        // Save device name and log configuration event
+        if (shouldSaveConfig) {
+            String newName = customDeviceName.getValue();
+            if (newName.length() > 0 && newName != oldDeviceName) {
+                strncpy(deviceName, newName.c_str(), sizeof(deviceName) - 1);
+                deviceName[sizeof(deviceName) - 1] = '\0';
+                saveDeviceName(deviceName);
+                
+                String msg = "Name: '" + oldDeviceName + "' -> '" + String(deviceName) + "', SSID: " + 
+                            WiFi.SSID() + ", IP: " + WiFi.localIP().toString();
+                sendEventToInfluxDB("device_configured", msg, "info");
+            } else {
+                String msg = "WiFi reconfigured - SSID: " + WiFi.SSID() + ", IP: " + 
+                            WiFi.localIP().toString() + ", Name unchanged: " + String(deviceName);
+                sendEventToInfluxDB("device_configured", msg, "info");
+            }
+        }
     } else {
         // Normal boot - try to connect with saved credentials
         Serial.println("[WiFi] Normal boot - attempting connection...");
@@ -231,6 +446,24 @@ void setupWiFi() {
         if (!wm.autoConnect(apName)) {
             Serial.println("[WiFi] Failed to connect");
             Serial.println("[WiFi] Running in offline mode - double-reset to configure");
+        }
+        
+        // Save device name and log configuration event if config was saved
+        if (shouldSaveConfig) {
+            String newName = customDeviceName.getValue();
+            if (newName.length() > 0 && newName != oldDeviceName) {
+                strncpy(deviceName, newName.c_str(), sizeof(deviceName) - 1);
+                deviceName[sizeof(deviceName) - 1] = '\0';
+                saveDeviceName(deviceName);
+                
+                String msg = "Name: '" + oldDeviceName + "' -> '" + String(deviceName) + "', SSID: " + 
+                            WiFi.SSID() + ", IP: " + WiFi.localIP().toString();
+                sendEventToInfluxDB("device_configured", msg, "info");
+            } else if (WiFi.status() == WL_CONNECTED) {
+                String msg = "WiFi reconfigured - SSID: " + WiFi.SSID() + ", IP: " + 
+                            WiFi.localIP().toString() + ", Name unchanged: " + String(deviceName);
+                sendEventToInfluxDB("device_configured", msg, "info");
+            }
         }
     }
 
@@ -248,6 +481,10 @@ void setupWiFi() {
         Serial.print(WiFi.RSSI());
         Serial.println(" dBm");
         Serial.println();
+        
+        // Log WiFi connection event
+        String msg = "Connected to " + WiFi.SSID() + " with IP " + WiFi.localIP().toString();
+        sendEventToInfluxDB("wifi_connected", msg, "info");
     } else {
         Serial.println("[WiFi] Not connected - running in offline mode");
     }
@@ -614,7 +851,11 @@ void sendDataToInfluxDB() {
 
     // Battery data (SmartShunt)
     if (smartShunt.isDataValid()) {
-        data += "battery,device=solar-monitor,location=garage ";
+        // Replace spaces with underscores in device name for tag value
+        String deviceTag = String(deviceName);
+        deviceTag.replace(" ", "_");
+        
+        data += "battery,device=" + deviceTag + ",location=garage ";
         data += "voltage=" + String(smartShunt.getBatteryVoltage(), 3) + ",";
         data += "current=" + String(smartShunt.getBatteryCurrent(), 3) + ",";
         data += "soc=" + String(smartShunt.getStateOfCharge(), 1) + ",";
@@ -632,7 +873,10 @@ void sendDataToInfluxDB() {
 
     // Solar data (MPPT1)
     if (mppt1.isDataValid()) {
-        data += "solar,device=solar-monitor,location=garage,mppt=1 ";
+        String deviceTag = String(deviceName);
+        deviceTag.replace(" ", "_");
+        
+        data += "solar,device=" + deviceTag + ",location=garage,mppt=1 ";
         data += "pv_voltage=" + String(mppt1.getPanelVoltage(), 3) + ",";
         data += "pv_power=" + String(mppt1.getPanelPower(), 1) + ",";
         data += "battery_voltage=" + String(mppt1.getBatteryVoltage(), 3) + ",";
@@ -649,7 +893,10 @@ void sendDataToInfluxDB() {
 
     // Solar data (MPPT2)
     if (mppt2.isDataValid()) {
-        data += "solar,device=solar-monitor,location=garage,mppt=2 ";
+        String deviceTag = String(deviceName);
+        deviceTag.replace(" ", "_");
+        
+        data += "solar,device=" + deviceTag + ",location=garage,mppt=2 ";
         data += "pv_voltage=" + String(mppt2.getPanelVoltage(), 3) + ",";
         data += "pv_power=" + String(mppt2.getPanelPower(), 1) + ",";
         data += "battery_voltage=" + String(mppt2.getBatteryVoltage(), 3) + ",";
@@ -665,7 +912,10 @@ void sendDataToInfluxDB() {
     }
 
     // System data
-    data += "system,device=solar-monitor,location=garage ";
+    String deviceTag = String(deviceName);
+    deviceTag.replace(" ", "_");
+    
+    data += "system,device=" + deviceTag + ",location=garage ";
     data += "uptime=" + String((millis() - bootTime) / 1000) + ",";
     data += "wifi_rssi=" + String(WiFi.RSSI()) + ",";
     data += "free_heap=" + String(ESP.getFreeHeap()) + ",";
@@ -678,9 +928,17 @@ void sendDataToInfluxDB() {
 
     if (httpResponseCode > 0) {
         Serial.printf("[InfluxDB] Data sent successfully, response: %d\n", httpResponseCode);
+        influxDBFailureCount = 0;  // Reset failure counter on success
     } else {
         Serial.printf("[InfluxDB] Failed to send data, error: %d\n", httpResponseCode);
         Serial.println("[InfluxDB] Response: " + http.getString());
+        
+        influxDBFailureCount++;
+        // Log error every 10th failure to avoid spam
+        if (influxDBFailureCount % 10 == 1) {
+            String errorMsg = "POST failed: " + String(httpResponseCode < 0 ? "connection failed" : "HTTP " + String(httpResponseCode));
+            sendEventToInfluxDB("influxdb_error", errorMsg, "error");
+        }
     }
 
     http.end();
