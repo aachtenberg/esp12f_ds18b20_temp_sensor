@@ -1,92 +1,64 @@
 /*********
-  Rui Santos
-  Complete project details at https://RandomNerdTutorials.com  
+  Temperature Sensor with WiFiManager
+  Based on Rui Santos project from RandomNerdTutorials.com
+
+  Uses standard WebServer for compatibility with WiFiManager
 *********/
 
-// Import required libraries
+#include <Arduino.h>
 #ifdef ESP32
   #include <WiFi.h>
-  #include <ESPAsyncWebServer.h>
+  #include <WebServer.h>
   #include <HTTPClient.h>
-  #include <WiFiClientSecure.h>
 #else
-  #include <Arduino.h>
   #include <ESP8266WiFi.h>
-  #include <Hash.h>
-  #include <ESPAsyncTCP.h>
-  #include <ESPAsyncWebServer.h>
+  #include <ESP8266WebServer.h>
   #include <ESP8266HTTPClient.h>
   #include <WiFiClient.h>
 #endif
+
+#include <WiFiManager.h>
+#include <ESP_DoubleResetDetector.h>
 #include <OneWire.h>
 #include <DallasTemperature.h>
 #include <PubSubClient.h>
 #include <ArduinoJson.h>
+#ifdef ESP32
+  #include <SPIFFS.h>
+#else
+  #include <LittleFS.h>
+#endif
 #include "secrets.h"
 #include "device_config.h"
 
-// Exponential backoff class for network operations
-class NetworkBackoff {
-private:
-    unsigned long lastFailure = 0;
-    int consecutiveFailures = 0;
-    unsigned long minDelayMs;
-    unsigned long maxDelayMs;
-    int maxFailures;
-    
-public:
-    // Constructor with customizable backoff parameters
-    NetworkBackoff(unsigned long minMs = MIN_BACKOFF_MS, 
-                   unsigned long maxMs = MAX_BACKOFF_MS,
-                   int maxFails = MAX_CONSECUTIVE_FAILURES)
-        : minDelayMs(minMs), maxDelayMs(maxMs), maxFailures(maxFails) {}
-    
-    unsigned long getBackoffDelay() {
-        if (consecutiveFailures == 0) return 0;
-        
-        // Exponential backoff: uses configured min/max
-        unsigned long delay = min((unsigned long)pow(2, consecutiveFailures - 1) * 1000, maxDelayMs);
-        return max(delay, minDelayMs);
-    }
-    
-    void recordFailure() {
-        consecutiveFailures = min(consecutiveFailures + 1, maxFailures);
-        lastFailure = millis();
-    }
-    
-    void recordSuccess() {
-        consecutiveFailures = 0;
-    }
-    
-    bool shouldRetry() {
-        if (consecutiveFailures == 0) return true;
-        return (millis() - lastFailure) >= getBackoffDelay();
-    }
-    
-    int getConsecutiveFailures() {
-        return consecutiveFailures;
-    }
-};
+// Double Reset Detector configuration
+#define DRD_TIMEOUT 3           // Seconds to wait for second reset
+#define DRD_ADDRESS 0           // RTC memory address (ESP8266) or EEPROM address (ESP32)
+
+// Create Double Reset Detector instance
+DoubleResetDetector* drd;
+
+// Device name storage
+char deviceName[40] = "Temp Sensor";  // Default name
+const char* DEVICE_NAME_FILE = "/device_name.txt";
 
 // Device metrics structure for monitoring
 struct DeviceMetrics {
     unsigned long bootTime;
     unsigned int wifiReconnects;
     unsigned int sensorReadFailures;
-    unsigned int lambdaSendFailures;
     unsigned int influxSendFailures;
     float minTempC;
     float maxTempC;
-    unsigned long lastSuccessfulLambdaSend;
     unsigned long lastSuccessfulInfluxSend;
-    
-    DeviceMetrics() : bootTime(0), wifiReconnects(0), sensorReadFailures(0), 
-                     lambdaSendFailures(0), influxSendFailures(0),
+
+    DeviceMetrics() : bootTime(0), wifiReconnects(0), sensorReadFailures(0),
+                     influxSendFailures(0),
                      minTempC(999.0f), maxTempC(-999.0f),
-                     lastSuccessfulLambdaSend(0), lastSuccessfulInfluxSend(0) {}
-    
+                     lastSuccessfulInfluxSend(0) {}
+
     void updateTemperature(float tempC) {
-        if (tempC > -100.0f && tempC < 100.0f) {  // Valid temperature range
+        if (tempC > -100.0f && tempC < 100.0f) {
             minTempC = min(minTempC, tempC);
             maxTempC = max(maxTempC, tempC);
         }
@@ -94,13 +66,12 @@ struct DeviceMetrics {
 };
 
 // Global instances
-NetworkBackoff lambdaBackoff(MIN_BACKOFF_MS, MAX_BACKOFF_MS, MAX_CONSECUTIVE_FAILURES);
 DeviceMetrics metrics;
 
 // Data wire is connected to GPIO 4
 OneWire oneWire(ONE_WIRE_PIN);
 
-// Pass our oneWire reference to Dallas Temperature sensor 
+// Pass our oneWire reference to Dallas Temperature sensor
 DallasTemperature sensors(&oneWire);
 
 // Variables to store temperature values
@@ -108,52 +79,80 @@ String temperatureF = "--";
 String temperatureC = "--";
 
 // Timer variables
-unsigned long lastTime = 0;  
+unsigned long lastTime = 0;
 unsigned long timerDelay = TEMPERATURE_READ_INTERVAL_MS;
 unsigned long lastWiFiCheck = 0;
-const unsigned long WIFI_CHECK_INTERVAL = WIFI_CHECK_INTERVAL_MS;  // Check WiFi every 30 seconds
+const unsigned long WIFI_CHECK_INTERVAL = WIFI_CHECK_INTERVAL_MS;
 
-// WiFi credentials are stored in include/secrets.h as WIFI_SSID and WIFI_PASSWORD
+// Create WebServer object on port 80
+#ifdef ESP32
+  WebServer server(80);
+#else
+  ESP8266WebServer server(80);
+#endif
 
-// Create AsyncWebServer object on port 80
-AsyncWebServer server(80);
-
-// MQTT for remote logging
+// MQTT for remote logging (disabled by default)
 WiFiClient espClient;
 PubSubClient mqttClient(espClient);
 
-String readDSTemperatureC() {
-  // This function is kept for compatibility but calls the shared updater below.
-  sensors.requestTemperatures();
-  float tempC = sensors.getTempCByIndex(0);
-  if (tempC == DEVICE_DISCONNECTED_C) {
-    Serial.println("Failed to read from DS18B20 sensor (C)");
-    return String("--");
+// Load device name from filesystem
+void loadDeviceName() {
+#ifdef ESP32
+  if (!SPIFFS.begin(true)) {
+    Serial.println("[FS] Failed to mount SPIFFS");
+    return;
   }
-  return String(tempC);
+  if (SPIFFS.exists(DEVICE_NAME_FILE)) {
+    File file = SPIFFS.open(DEVICE_NAME_FILE, "r");
+#else
+  if (!LittleFS.begin()) {
+    Serial.println("[FS] Failed to mount LittleFS");
+    return;
+  }
+  if (LittleFS.exists(DEVICE_NAME_FILE)) {
+    File file = LittleFS.open(DEVICE_NAME_FILE, "r");
+#endif
+    if (file) {
+      String name = file.readStringUntil('\n');
+      name.trim();
+      if (name.length() > 0 && name.length() < sizeof(deviceName)) {
+        strcpy(deviceName, name.c_str());
+        Serial.print("[Config] Loaded device name: ");
+        Serial.println(deviceName);
+      }
+      file.close();
+    }
+  } else {
+    Serial.println("[Config] No saved device name, using default");
+  }
 }
 
-String readDSTemperatureF() {
-  sensors.requestTemperatures();
-  float tempF = sensors.getTempFByIndex(0);
-  if (int(tempF) == DEVICE_DISCONNECTED_F) {
-    Serial.println("Failed to read from DS18B20 sensor (F)");
-    return String("--");
+// Save device name to filesystem
+void saveDeviceName(const char* name) {
+#ifdef ESP32
+  File file = SPIFFS.open(DEVICE_NAME_FILE, "w");
+#else
+  File file = LittleFS.open(DEVICE_NAME_FILE, "w");
+#endif
+  if (file) {
+    file.println(name);
+    file.close();
+    Serial.print("[Config] Saved device name: ");
+    Serial.println(name);
+  } else {
+    Serial.println("[Config] Failed to save device name");
   }
-  return String(tempF);
 }
+
+// Forward declarations
+void sendEventToInfluxDB(const String& eventType, const String& message, const String& severity);
 
 // Validate that temperature reading is valid
 bool isValidTemperature(const String& temp) {
   return temp.length() > 0 && temp != "--";
 }
 
-// Simple logging function - just output to serial
-void logMessage(String msg) {
-  Serial.println(msg);
-}
-
-// Update both temperature globals in one call. Use this in loop() to refresh values.
+// Update both temperature globals in one call
 void updateTemperatures() {
   sensors.requestTemperatures();
   float tC = sensors.getTempCByIndex(0);
@@ -162,20 +161,56 @@ void updateTemperatures() {
     temperatureF = "--";
     Serial.println("DS18B20 read failed");
     metrics.sensorReadFailures++;
+    sendEventToInfluxDB("sensor_error", "DS18B20 read failed", "error");
   } else {
-    // Format with 2 decimal places
     char buf[16];
     dtostrf(tC, 0, 2, buf);
     temperatureC = String(buf);
     float tF = sensors.toFahrenheit(tC);
     dtostrf(tF, 0, 2, buf);
     temperatureF = String(buf);
-    logMessage("Temperature C: " + temperatureC);
-    logMessage("Temperature F: " + temperatureF);
-    
-    // Update metrics with valid temperature
+    Serial.println("Temperature C: " + temperatureC);
+    Serial.println("Temperature F: " + temperatureF);
     metrics.updateTemperature(tC);
   }
+}
+
+// Send event/error data to InfluxDB
+void sendEventToInfluxDB(const String& eventType, const String& message, const String& severity = "info") {
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("WiFi not connected, skipping event log");
+    return;
+  }
+
+  WiFiClient client;
+  HTTPClient http;
+  http.setTimeout(HTTP_TIMEOUT_MS);
+
+  String url = String(INFLUXDB_URL) + "/api/v2/write?org=" + String(INFLUXDB_ORG) + "&bucket=" + String(INFLUXDB_BUCKET) + "&precision=s";
+  
+  http.begin(client, url);
+  http.addHeader("Authorization", "Token " + String(INFLUXDB_TOKEN));
+  http.addHeader("Content-Type", "text/plain");
+
+  String deviceTag = String(deviceName);
+  deviceTag.replace(" ", "_");
+  String eventTypeTag = eventType;
+  eventTypeTag.replace(" ", "_");
+  
+  String payload = "device_events,device=" + deviceTag + ",board=" + String(DEVICE_BOARD) + ",event_type=" + eventTypeTag + ",severity=" + severity + " message=\"" + message + "\",value=1";
+  
+  int httpCode = http.POST(payload);
+  
+  if (httpCode > 0) {
+    if (httpCode == 204) {
+      Serial.println("[Event] Logged to InfluxDB: " + eventType);
+    } else {
+      Serial.println("[Event] InfluxDB returned code " + String(httpCode));
+    }
+  } else {
+    Serial.println("[Event] Failed to log: " + String(http.errorToString(httpCode)));
+  }
+  http.end();
 }
 
 void sendToInfluxDB() {
@@ -189,48 +224,26 @@ void sendToInfluxDB() {
     return;
   }
 
-  // Create appropriate client based on local vs cloud
-#if USE_LOCAL_INFLUXDB
-  // Local InfluxDB: Use unencrypted HTTP
   WiFiClient client;
   HTTPClient http;
-#else
-  // Cloud InfluxDB: Use HTTPS with certificate verification disabled
-  WiFiClientSecure client;
-  client.setInsecure();
-  HTTPClient http;
-#endif
-  
   http.setTimeout(HTTP_TIMEOUT_MS);
-  
-  // Build URL based on local vs cloud
-#if USE_LOCAL_INFLUXDB
+
   String url = String(INFLUXDB_URL) + "/api/v2/write?org=" + String(INFLUXDB_ORG) + "&bucket=" + String(INFLUXDB_BUCKET) + "&precision=s";
-  Serial.println("InfluxDB (Local): " + url);
-#else
-  String url = String(INFLUXDB_URL) + "/api/v2/write?bucket=" + String(INFLUXDB_BUCKET) + "&precision=s";
-  Serial.println("InfluxDB (Cloud): " + url);
-#endif
-  
+  Serial.println("InfluxDB: " + url);
+
   http.begin(client, url);
   http.addHeader("Authorization", "Token " + String(INFLUXDB_TOKEN));
   http.addHeader("Content-Type", "text/plain");
 
-  // Line protocol payload for InfluxDB
-  String deviceTag = String(DEVICE_LOCATION);
+  String deviceTag = String(deviceName);
   deviceTag.replace(" ", "_");
   String payload = "temperature,sensor=ds18b20,location=esp12f,device=" + deviceTag + " tempC=" + temperatureC + ",tempF=" + temperatureF;
-  
+
   int httpCode = http.POST(payload);
-  
+
   if (httpCode > 0) {
     if (httpCode == 204) {
-#if USE_LOCAL_INFLUXDB
-      Serial.println("✅ InfluxDB (Local): 204 OK");
-#else
-      Serial.println("✅ InfluxDB (Cloud): 204 OK");
-#endif
-      
+      Serial.println("InfluxDB: 204 OK");
       metrics.lastSuccessfulInfluxSend = millis();
     } else {
       String response = http.getString();
@@ -238,36 +251,34 @@ void sendToInfluxDB() {
       metrics.influxSendFailures++;
     }
   } else {
-    Serial.println("❌ InfluxDB POST failed: " + String(http.errorToString(httpCode)));
+    Serial.println("InfluxDB POST failed: " + String(http.errorToString(httpCode)));
     metrics.influxSendFailures++;
+    // Only log error event every 10 failures to avoid spam
+    if (metrics.influxSendFailures % 10 == 1) {
+      sendEventToInfluxDB("influxdb_error", "POST failed: " + String(http.errorToString(httpCode)), "error");
+    }
   }
   http.end();
 }
 
-const char index_html[] PROGMEM = R"rawliteral(<!DOCTYPE HTML><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>%PAGE_TITLE%</title><style>body{margin:0;padding:8px;background:#0f172a;font-family:system-ui;color:#e2e8f0;text-align:center}.c{background:#1e293b;border:1px solid #334155;border-radius:12px;padding:16px;max-width:350px;margin:0 auto}.h{margin-bottom:12px}.dn{font-size:1.3rem;font-weight:600;color:#94a3b8;margin-bottom:4px}.st{font-size:0.8rem;color:#94a3b8}.si{display:inline-block;width:8px;height:8px;background:#10b981;border-radius:50%;margin-right:4px;animation:p 2s infinite}@keyframes p{0%,100%{opacity:1}50%{opacity:0.5}}.td{background:linear-gradient(135deg,#1e3a5f,#0f172a);border:1px solid #334155;border-radius:10px;padding:16px;margin-bottom:12px}.tdc{display:flex;justify-content:center;align-items:baseline;gap:4px}.tv{font-size:3rem;font-weight:700;color:#38bdf8}.tu{font-size:0.9rem;color:#94a3b8}.f{background:#0f172a;border:1px solid #334155;border-radius:8px;padding:10px;display:flex;justify-content:center;align-items:center;gap:6px}.tl{font-size:0.85rem;color:#94a3b8}.tr{font-size:1.5rem;font-weight:700;color:#38bdf8}.ft{margin-top:12px;padding-top:8px;border-top:1px solid #334155;font-size:0.7rem;color:#64748b}</style></head><body><div class="c"><div class="h"><div class="dn">%PAGE_TITLE%</div><div><span class="si"></span><span class="st">Live</span></div></div><div class="td"><div class="tdc"><div class="tv" id="tc">%TEMPERATUREC%</div><div class="tu">°C</div></div></div><div class="f"><span class="tr" id="tf">%TEMPERATUREF%</span><span class="tl">°F</span></div><div class="ft">Updates every 15s</div></div><script>function u(){fetch('/temperaturec').then(r=>r.text()).then(d=>{document.getElementById('tc').textContent=d}).catch(e=>{});fetch('/temperaturef').then(r=>r.text()).then(d=>{document.getElementById('tf').textContent=d}).catch(e=>{});}u();setInterval(u,15000);</script></body></html>)rawliteral";
+// HTML page with template placeholders
+const char index_html[] PROGMEM = R"rawliteral(<!DOCTYPE HTML><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>%PAGE_TITLE%</title><style>body{margin:0;padding:8px;background:#0f172a;font-family:system-ui;color:#e2e8f0;text-align:center}.c{background:#1e293b;border:1px solid #334155;border-radius:12px;padding:16px;max-width:350px;margin:0 auto}.h{margin-bottom:12px}.dn{font-size:1.3rem;font-weight:600;color:#94a3b8;margin-bottom:4px}.st{font-size:0.8rem;color:#94a3b8}.si{display:inline-block;width:8px;height:8px;background:#10b981;border-radius:50%;margin-right:4px;animation:p 2s infinite}@keyframes p{0%,100%{opacity:1}50%{opacity:0.5}}.td{background:linear-gradient(135deg,#1e3a5f,#0f172a);border:1px solid #334155;border-radius:10px;padding:16px;margin-bottom:12px}.tdc{display:flex;justify-content:center;align-items:baseline;gap:4px}.tv{font-size:3rem;font-weight:700;color:#38bdf8}.tu{font-size:0.9rem;color:#94a3b8}.f{background:#0f172a;border:1px solid #334155;border-radius:8px;padding:10px;display:flex;justify-content:center;align-items:center;gap:6px}.tl{font-size:0.85rem;color:#94a3b8}.tr{font-size:1.5rem;font-weight:700;color:#38bdf8}.ft{margin-top:12px;padding-top:8px;border-top:1px solid #334155;font-size:0.7rem;color:#64748b}</style></head><body><div class="c"><div class="h"><div class="dn">%PAGE_TITLE%</div><div><span class="si"></span><span class="st">Live</span></div></div><div class="td"><div class="tdc"><div class="tv" id="tc">%TEMPERATUREC%</div><div class="tu">C</div></div></div><div class="f"><span class="tr" id="tf">%TEMPERATUREF%</span><span class="tl">F</span></div><div class="ft">Updates every 15s</div></div><script>function u(){fetch('/temperaturec').then(r=>r.text()).then(d=>{document.getElementById('tc').textContent=d}).catch(e=>{});fetch('/temperaturef').then(r=>r.text()).then(d=>{document.getElementById('tf').textContent=d}).catch(e=>{});}u();setInterval(u,15000);</script></body></html>)rawliteral";
 
-// Replaces placeholder with DS18B20 values
-String processor(const String& var){
-  //Serial.println(var);
-  if(var == "TEMPERATUREC"){
-    return temperatureC;
-  }
-  else if(var == "TEMPERATUREF"){
-    return temperatureF;
-  }
-  else if(var == "PAGE_TITLE"){
-    return DEVICE_LOCATION;
-  }
-  return String();
+// Process template placeholders
+String processTemplate(const String& html) {
+  String result = html;
+  result.replace("%PAGE_TITLE%", deviceName);
+  result.replace("%TEMPERATUREC%", temperatureC);
+  result.replace("%TEMPERATUREF%", temperatureF);
+  return result;
 }
 
 // Health check endpoint response
 String getHealthStatus() {
-  // Use JsonDocument for memory efficiency (replaces deprecated StaticJsonDocument)
   JsonDocument doc;
-  
+
   doc["status"] = "ok";
-  doc["device"] = DEVICE_LOCATION;
+  doc["device"] = deviceName;
   doc["board"] = DEVICE_BOARD;
   doc["uptime_seconds"] = (millis() - metrics.bootTime) / 1000;
   doc["wifi_connected"] = (WiFi.status() == WL_CONNECTED);
@@ -275,172 +286,250 @@ String getHealthStatus() {
   doc["temperature_valid"] = isValidTemperature(temperatureC);
   doc["current_temp_c"] = temperatureC;
   doc["current_temp_f"] = temperatureF;
-  doc["last_reading_ms"] = lastTime;
-  
-  // Metrics
+
   doc["metrics"]["wifi_reconnects"] = metrics.wifiReconnects;
   doc["metrics"]["sensor_read_failures"] = metrics.sensorReadFailures;
-  doc["metrics"]["lambda_send_failures"] = metrics.lambdaSendFailures;
   doc["metrics"]["influx_send_failures"] = metrics.influxSendFailures;
-  
-  // Handle min/max temperature (avoid null values in JSON)
+
   if (metrics.minTempC < 900.0f) {
     doc["metrics"]["min_temp_c"] = metrics.minTempC;
-  } else {
-    doc["metrics"]["min_temp_c"] = nullptr;
   }
-  
   if (metrics.maxTempC > -900.0f) {
     doc["metrics"]["max_temp_c"] = metrics.maxTempC;
-  } else {
-    doc["metrics"]["max_temp_c"] = nullptr;
-  }
-  
-  // Backoff status
-  doc["backoff"]["lambda_active"] = (lambdaBackoff.getConsecutiveFailures() > 0);
-  doc["backoff"]["lambda_failures"] = lambdaBackoff.getConsecutiveFailures();
-
-  
-  // Last successful sends
-  if (metrics.lastSuccessfulLambdaSend > 0) {
-    doc["last_success"]["lambda_seconds_ago"] = (millis() - metrics.lastSuccessfulLambdaSend) / 1000;
   }
   if (metrics.lastSuccessfulInfluxSend > 0) {
     doc["last_success"]["influx_seconds_ago"] = (millis() - metrics.lastSuccessfulInfluxSend) / 1000;
   }
-  
+
   String response;
   serializeJson(doc, response);
   return response;
 }
 
-void setup(){
+// Web request handlers
+void handleRoot() {
+  String html = FPSTR(index_html);
+  html = processTemplate(html);
+  server.send(200, "text/html", html);
+}
+
+void handleTemperatureC() {
+  server.send(200, "text/plain", temperatureC);
+}
+
+void handleTemperatureF() {
+  server.send(200, "text/plain", temperatureF);
+}
+
+void handleHealth() {
+  String response = getHealthStatus();
+  server.send(200, "application/json", response);
+}
+
+void setupWebServer() {
+  server.on("/", HTTP_GET, handleRoot);
+  server.on("/temperaturec", HTTP_GET, handleTemperatureC);
+  server.on("/temperaturef", HTTP_GET, handleTemperatureF);
+  server.on("/health", HTTP_GET, handleHealth);
+  server.begin();
+  Serial.println("[HTTP] Web server started on port 80");
+}
+
+void setupWiFi() {
+  // Initialize Double Reset Detector
+  drd = new DoubleResetDetector(DRD_TIMEOUT, DRD_ADDRESS);
+
+  // Create WiFiManager instance
+  WiFiManager wm;
+
+  // Set custom AP name based on device location
+  String apName = String(deviceName);
+  apName.replace(" ", "-");
+  apName = "Temp-" + apName + "-Setup";
+
+  // Create custom parameter for device name (must persist throughout function)
+  WiFiManagerParameter custom_device_name("device_name", "Device Name", deviceName, 40);
+  wm.addParameter(&custom_device_name);
+
+  // Don't use timeout - keep retrying forever in weak WiFi zones
+  wm.setConnectTimeout(0);
+
+  #ifdef ESP32
+    WiFi.setSleep(false);
+  #else
+    WiFi.setSleepMode(WIFI_NONE_SLEEP);
+  #endif
+  WiFi.mode(WIFI_STA);
+
+  // Check for double reset - enter config portal if detected
+  if (drd->detectDoubleReset()) {
+    Serial.println();
+    Serial.println("========================================");
+    Serial.println("  DOUBLE RESET DETECTED");
+    Serial.println("  Starting WiFi Configuration Portal");
+    Serial.println("========================================");
+    Serial.println();
+    Serial.println("[WiFi] Connect to AP: " + apName);
+    Serial.println("[WiFi] Then open http://192.168.4.1 in browser");
+    Serial.println();
+
+    // Set save config callback to save device name
+    bool shouldSaveConfig = false;
+    wm.setSaveConfigCallback([&shouldSaveConfig](){
+      Serial.println("[Config] Configuration saved, will update device name...");
+      shouldSaveConfig = true;
+    });
+
+    if (!wm.startConfigPortal(apName.c_str())) {
+      Serial.println("[WiFi] Failed to connect after config portal");
+      Serial.println("[WiFi] Restarting...");
+      delay(3000);
+      ESP.restart();
+    } else {
+      // Save the device name if config was saved
+      if (shouldSaveConfig) {
+        const char* newName = custom_device_name.getValue();
+        Serial.print("[Config] New device name: ");
+        Serial.println(newName);
+        String oldName = String(deviceName);
+        strcpy(deviceName, newName);
+        saveDeviceName(deviceName);
+        
+        // Log configuration change with details
+        if (oldName != String(newName)) {
+          sendEventToInfluxDB("device_configured", "Name: '" + oldName + "' -> '" + String(newName) + "', SSID: " + WiFi.SSID() + ", IP: " + WiFi.localIP().toString(), "info");
+        } else {
+          sendEventToInfluxDB("device_configured", "WiFi reconfigured - SSID: " + WiFi.SSID() + ", IP: " + WiFi.localIP().toString() + ", Name unchanged: " + oldName, "info");
+        }
+      }
+    }
+  } else {
+    Serial.println("[WiFi] Normal boot - attempting connection...");
+    Serial.println("[WiFi] (Double-reset within 3 seconds to enter config mode)");
+    Serial.println();
+
+    // Set save config callback for autoConnect mode
+    bool shouldSaveConfig = false;
+    wm.setSaveConfigCallback([&shouldSaveConfig](){
+      Serial.println("[Config] Configuration saved, will update device name...");
+      shouldSaveConfig = true;
+    });
+
+    if (!wm.autoConnect(apName.c_str())) {
+      Serial.println("[WiFi] Failed to connect");
+      Serial.println("[WiFi] Running in offline mode - double-reset to configure");
+    } else if (shouldSaveConfig) {
+      // Save the device name if config was saved
+      const char* newName = custom_device_name.getValue();
+      Serial.print("[Config] New device name: ");
+      Serial.println(newName);
+      String oldName = String(deviceName);
+      strcpy(deviceName, newName);
+      saveDeviceName(deviceName);
+      
+      // Log configuration change with details
+      if (oldName != String(newName)) {
+        sendEventToInfluxDB("device_configured", "Name: '" + oldName + "' -> '" + String(newName) + "', SSID: " + WiFi.SSID() + ", IP: " + WiFi.localIP().toString(), "info");
+      } else {
+        sendEventToInfluxDB("device_configured", "WiFi reconfigured - SSID: " + WiFi.SSID() + ", IP: " + WiFi.localIP().toString() + ", Name unchanged: " + oldName, "info");
+      }
+    }
+  }
+
+  // Print connection status
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println();
+    Serial.println("========================================");
+    Serial.println("  WiFi Connected!");
+    Serial.println("========================================");
+    Serial.print("[WiFi] SSID: ");
+    Serial.println(WiFi.SSID());
+    Serial.print("[WiFi] IP Address: ");
+    Serial.println(WiFi.localIP());
+    Serial.print("[WiFi] Signal Strength: ");
+    Serial.print(WiFi.RSSI());
+    Serial.println(" dBm");
+    Serial.println();
+    
+    // Log WiFi connection event
+    sendEventToInfluxDB("wifi_connected", "Connected to " + WiFi.SSID() + " with IP " + WiFi.localIP().toString(), "info");
+  } else {
+    Serial.println("[WiFi] Not connected - running in offline mode");
+  }
+}
+
+void setup() {
   // Initialize metrics
   metrics.bootTime = millis();
-  
-  // Serial port for debugging purposes
+
+  // Serial port for debugging
   Serial.begin(115200);
+  delay(1000);
+
   Serial.println();
-  
+  Serial.println("========================================");
+  Serial.println("     Temperature Sensor");
+  Serial.println("========================================");
+  Serial.println();
+
+  // Load device name from filesystem
+  loadDeviceName();
+
   // Start up the DS18B20 library
   sensors.begin();
   updateTemperatures();
 
-  // Connect to Wi-Fi with fallback support
-  #ifdef ESP32
-    WiFi.setSleep(false);  // Disable sleep for stable connection (ESP32)
+  // Connect to WiFi
+  setupWiFi();
+
+  // Setup web server
+  setupWebServer();
+
+  // Log device boot/reset event
+  String resetReason;
+  #ifdef ESP8266
+    resetReason = ESP.getResetReason();
   #else
-    WiFi.setSleepMode(WIFI_NONE_SLEEP);  // Disable sleep for stable connection (ESP8266)
+    resetReason = String(esp_reset_reason());
   #endif
-  
-  if (strlen(STATIC_IP) > 0) {
-    IPAddress local_IP;
-    IPAddress gateway;
-    IPAddress subnet;
-    IPAddress dns;
-    local_IP.fromString(STATIC_IP);
-    gateway.fromString(STATIC_GATEWAY);
-    subnet.fromString(STATIC_SUBNET);
-    dns.fromString(STATIC_DNS);
-    WiFi.config(local_IP, gateway, subnet, dns);
-  }
-  
-  // Try connecting to each WiFi network in order
-  bool wifiConnected = false;
-  for (int netIndex = 0; netIndex < NUM_WIFI_NETWORKS && !wifiConnected; netIndex++) {
-    Serial.println("Attempting WiFi: " + String(wifi_networks[netIndex].ssid));
-    WiFi.begin(wifi_networks[netIndex].ssid, wifi_networks[netIndex].password);
-    
-    int wifiAttempts = 0;
-    const int MAX_WIFI_ATTEMPTS = 20;  // ~10 seconds at 500ms intervals
-    
-    while (WiFi.status() != WL_CONNECTED && wifiAttempts < MAX_WIFI_ATTEMPTS) {
-      delay(500);
-      Serial.print(".");
-      wifiAttempts++;
-    }
-    
-    Serial.println();
-    
-    if (WiFi.status() == WL_CONNECTED) {
-      wifiConnected = true;
-      Serial.println("✅ WiFi connected to: " + String(wifi_networks[netIndex].ssid));
-      Serial.println("📍 IP Address: " + WiFi.localIP().toString());
-      Serial.println("📡 Signal strength: " + String(WiFi.RSSI()) + " dBm");
-    } else {
-      Serial.println("❌ Failed to connect to " + String(wifi_networks[netIndex].ssid));
-      if (netIndex < NUM_WIFI_NETWORKS - 1) {
-        Serial.println("Trying next network...");
-      }
-    }
-  }
-  
-  if (!wifiConnected) {
-    Serial.println("❌ Failed to connect to any WiFi network");
-    Serial.println("Continuing with offline mode - will retry in main loop");
-  }
+  sendEventToInfluxDB("device_boot", "Device started - Reset reason: " + resetReason + ", Uptime: 0s, Free heap: " + String(ESP.getFreeHeap()) + " bytes", "info");
 
-  // Connect to MQTT broker (disabled to save RAM on ESP8266)
-  // mqttClient.setServer(MQTT_BROKER, MQTT_PORT);
-  // logMessage("MQTT client configured");
-
-  // Route for root / web page
-  server.on("/", HTTP_GET, [](AsyncWebServerRequest *request){
-    request->send_P(200, "text/html", index_html, processor);
-  });
-  server.on("/temperaturec", HTTP_GET, [](AsyncWebServerRequest *request){
-    request->send(200, "text/plain", temperatureC);
-  });
-  server.on("/temperaturef", HTTP_GET, [](AsyncWebServerRequest *request){
-    request->send(200, "text/plain", temperatureF);
-  });
-  
-  // Health check endpoint
-  server.on("/health", HTTP_GET, [](AsyncWebServerRequest *request){
-    String response = getHealthStatus();
-    request->send(200, "application/json", response);
-  });
-  
-  // Start server
-  server.begin();
+  Serial.println();
+  Serial.println("========================================");
+  Serial.println("     Setup Complete");
+  Serial.println("========================================");
+  Serial.println();
 }
- 
-void loop(){
-  // Non-blocking WiFi connection check with WiFi-specific backoff
+
+void loop() {
+  // Must call drd->loop() to keep double reset detection working
+  drd->loop();
+
+  // Handle web requests
+  server.handleClient();
+
+  // Periodic WiFi check
   unsigned long now = millis();
   if (now - lastWiFiCheck > WIFI_CHECK_INTERVAL) {
     lastWiFiCheck = now;
-    
+
     if (WiFi.status() != WL_CONNECTED) {
       Serial.println("WiFi disconnected, attempting reconnection...");
-      WiFi.reconnect();  // Non-blocking reconnect attempt
+      WiFi.reconnect();
       metrics.wifiReconnects++;
-    } else {
-      Serial.println("WiFi connected, signal: " + String(WiFi.RSSI()) + " dBm");
+      // Only log every 5 reconnects to avoid spam
+      if (metrics.wifiReconnects % 5 == 1) {
+        sendEventToInfluxDB("wifi_reconnect", "WiFi disconnected, reconnect attempt #" + String(metrics.wifiReconnects), "warning");
+      }
     }
   }
 
-  // MQTT reconnect (disabled by default, not used in current setup)
-  // if (!mqttClient.connected()) {
-  //   logMessage("Attempting MQTT reconnection...");
-  //   String clientId = "ESP12fClient_" + String(ESP.getChipId(), HEX);
-  //   if (mqttClient.connect(clientId.c_str(), MQTT_USER, MQTT_PASSWORD)) {
-  //     logMessage("MQTT connected with ID: " + clientId);
-  //   } else {
-  //     Serial.print("MQTT connection failed, rc=");
-  //     Serial.print(mqttClient.state());
-  //     Serial.println(" retrying in 5 seconds");
-  //     delay(5000);
-  //   }
-  // }
-
+  // Periodic temperature reading and InfluxDB send
   if ((millis() - lastTime) > timerDelay) {
     updateTemperatures();
     if (temperatureC != "--") {
-      // sendToLambda();  // Disabled - sending to InfluxDB only
-      sendToInfluxDB();  // Send to local or cloud InfluxDB
+      sendToInfluxDB();
     }
     lastTime = millis();
   }
-    //Serial.println(WiFi.localIP());
 }

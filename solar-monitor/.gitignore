@@ -1,0 +1,19 @@
+# PlatformIO build artifacts
+.pio/
+.pioenvs/
+.piolibdeps/
+
+# IDE settings (optional, can be committed if desired)
+.vscode/
+.idea/
+
+# Secrets file (must not be committed!)
+include/secrets.h
+
+# macOS
+.DS_Store
+
+# Temporary files
+*.swp
+*.swo
+*~
