@@ -32,23 +32,32 @@ ESP Devices → Raspberry Pi (192.168.0.167)
 
 See [docs/README.md](docs/README.md) for complete architecture details.
 
-## Quick Start (Temperature Sensor)
+## Quick Start
 
-1. **Configure InfluxDB**: Create `include/secrets.h` from template:
-   ```bash
-   cp include/secrets.h.example include/secrets.h
-   # Edit with your InfluxDB credentials only
-   ```
+### Temperature Sensor
+```bash
+# 1. Configure InfluxDB credentials
+cp include/secrets.h.example include/secrets.h
+# Edit include/secrets.h with your InfluxDB settings
 
-2. **Set Device Location**: Edit `include/device_config.h`:
-   ```cpp
-   static const char* DEVICE_LOCATION = "Big Garage";
-   ```
+# 2. Flash device (WiFi configured via portal)
+./scripts/flash_device.sh temp
 
-3. **Build & Flash**:
-   ```bash
-   scripts/flash_device.sh "Device Name" esp8266
-   ```
+# 3. Configure via WiFiManager portal
+# Connect to "ESP-Setup" AP → http://192.168.4.1
+```
+
+### Solar Monitor  
+```bash
+# 1. Same secrets.h setup as above
+
+# 2. Flash solar monitor
+./scripts/flash_device.sh solar
+
+# 3. Same WiFiManager portal configuration
+```
+
+📖 **Complete Guide**: See [docs/reference/PLATFORM_GUIDE.md](docs/reference/PLATFORM_GUIDE.md)
 
 4. **Configure WiFi**: On first boot (or double-reset), connect to the "Temp-Device-Setup" AP and configure WiFi via the captive portal.
 
@@ -83,8 +92,9 @@ For detailed setup instructions, see [docs/SETUP.md](docs/SETUP.md).
 
 ## Documentation
 
+- [**Platform Guide**](docs/reference/PLATFORM_GUIDE.md) - **Main documentation & architecture**
+- [Configuration Guide](docs/reference/CONFIG.md) - **InfluxDB setup & deployment commands**
 - [Architecture Overview](docs/README.md) - Complete system architecture and data flow
-- [Secrets Setup Guide](docs/guides/SECRETS_SETUP.md) - **Configure InfluxDB credentials**
 - [Full Setup Guide](docs/SETUP.md) - Detailed setup instructions
 - [Event Logging](docs/EVENT_LOGGING.md) - **Device monitoring and diagnostics** - Track boots, errors, config changes
 - [Code Structure](docs/architecture/CODE_STRUCTURE.md) - Technical implementation details
