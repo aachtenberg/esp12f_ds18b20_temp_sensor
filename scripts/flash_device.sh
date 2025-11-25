@@ -1,27 +1,60 @@
 #!/bin/bash
-# Flash ESP device (ESP8266 or ESP32) with specific location name
-# Usage: ./flash_device.sh "Device Location" [board_type]
-# board_type: esp8266 or esp32 (default: esp32)
+# Flash ESP device (Temperature Sensor or Solar Monitor)
+# Usage: ./flash_device.sh [project_type] [board_type] [device_name]
+# project_type: temp or solar (default: temp)
+# board_type: esp8266 or esp32 (default: auto-detect from project)
+# device_name: optional, will be configurable via WiFiManager portal
 
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-LOCATION="${1:-}"
-BOARD="${2:-esp32}"
+
+# Show usage if needed (check first)
+if [ "$1" = "--help" ] || [ "$1" = "-h" ]; then
+    echo "Usage: $0 [project_type] [board_type] [device_name]"
+    echo ""
+    echo "Arguments:"
+    echo "  project_type: temp or solar (default: temp)"
+    echo "  board_type:   esp8266 or esp32 (default: auto-detect)"
+    echo "  device_name:  optional device name (configurable via WiFi portal)"
+    echo ""
+    echo "Examples:"
+    echo "  $0                           # Flash temperature sensor (ESP8266)"
+    echo "  $0 solar                     # Flash solar monitor (ESP32)"
+    echo "  $0 temp esp32                # Flash temp sensor on ESP32"
+    echo "  $0 solar esp32 'Solar House' # Flash solar monitor with name"
+    echo ""
+    echo "Note: Device names can be set through WiFiManager portal after flashing"
+    exit 0
+fi
+
+PROJECT_TYPE="${1:-temp}"
+BOARD="${2:-}"
+DEVICE_NAME="${3:-}"
+
+# Validate project type
+if [ "$PROJECT_TYPE" != "temp" ] && [ "$PROJECT_TYPE" != "solar" ]; then
+    echo "❌ Invalid project type: $PROJECT_TYPE"
+    echo "Valid options: temp, solar"
+    exit 1
+fi
+
+# Set project directory and default board based on project type
+if [ "$PROJECT_TYPE" = "solar" ]; then
+    BUILD_DIR="$PROJECT_DIR/solar-monitor"
+    DEFAULT_BOARD="esp32"
+    PROJECT_NAME="Solar Monitor"
+else
+    BUILD_DIR="$PROJECT_DIR"
+    DEFAULT_BOARD="esp8266" 
+    PROJECT_NAME="Temperature Sensor"
+fi
+
+# Use provided board or default
+BOARD="${BOARD:-$DEFAULT_BOARD}"
 
 # Validate board type
 if [ "$BOARD" != "esp8266" ] && [ "$BOARD" != "esp32" ]; then
     echo "❌ Invalid board type: $BOARD"
     echo "Valid options: esp8266, esp32"
-    exit 1
-fi
-
-if [ -z "$LOCATION" ]; then
-    echo "Usage: $0 'Device Location' [board_type]"
-    echo ""
-    echo "Examples:"
-    echo "  $0 'Big Garage' esp32"
-    echo "  $0 'Bedroom' esp8266"
-    echo "  $0 'Living Room'  # defaults to esp32"
-    echo ""
     exit 1
 fi
 
@@ -33,35 +66,26 @@ else
 fi
 
 echo "================================"
-echo "ESP Temperature Sensor"
-echo "Device Flasher with Location"
+echo "ESP $PROJECT_NAME Flasher"
 echo "================================"
 echo ""
-echo "Device Location: $LOCATION"
+echo "Project Type: $PROJECT_TYPE ($PROJECT_NAME)"
 echo "Board Type: $BOARD"
 echo "Environment: $ENV"
+echo "Build Directory: $BUILD_DIR"
+if [ -n "$DEVICE_NAME" ]; then
+    echo "Device Name: $DEVICE_NAME (configurable via WiFi portal)"
+fi
 echo ""
 
-# Update device_config.h with location
-echo "Updating device configuration..."
-sed -i "s/static const char\* DEVICE_LOCATION = \".*\"/static const char* DEVICE_LOCATION = \"$LOCATION\"/" "$PROJECT_DIR/include/device_config.h"
-
-# Update device_config.h with board type
-sed -i "s/static const char\* DEVICE_BOARD = \".*\"/static const char* DEVICE_BOARD = \"$BOARD\"/" "$PROJECT_DIR/include/device_config.h"
-
-if grep -q "DEVICE_LOCATION = \"$LOCATION\"" "$PROJECT_DIR/include/device_config.h"; then
-    echo "✅ Configuration updated: DEVICE_LOCATION = \"$LOCATION\""
-    echo "✅ Configuration updated: DEVICE_BOARD = \"$BOARD\""
-else
-    echo "❌ Failed to update configuration"
-    exit 1
-fi
+# Note: Device names are now configured via WiFiManager portal
+# No need to modify device_config.h - that's the old approach
 
 echo ""
 echo "================================"
 echo "Building firmware..."
 echo "================================"
-cd "$PROJECT_DIR"
+cd "$BUILD_DIR"
 platformio run -e "$ENV" 2>&1 | tail -5
 
 if [ $? -ne 0 ]; then
@@ -98,14 +122,21 @@ fi
 echo ""
 echo "================================"
 echo "Uploading firmware..."
-echo "Device: $LOCATION ($BOARD)"
+echo "Project: $PROJECT_NAME ($BOARD)"
 echo "Port: $PORT"
 echo "================================"
 platformio run --target upload -e "$ENV" --upload-port "$PORT" 2>&1 | tail -10
 
 if [ $? -eq 0 ]; then
     echo ""
-    echo "✅ SUCCESS! Device flashed with location: $LOCATION ($BOARD)"
+    echo "✅ SUCCESS! $PROJECT_NAME flashed successfully ($BOARD)"
+    echo ""
+    if [ "$PROJECT_TYPE" = "solar" ]; then
+        echo "Device will create 'SolarMonitor-Setup' WiFi AP for configuration"
+    else
+        echo "Device will create 'Temp-*-Setup' WiFi AP for configuration"
+    fi
+    echo "Connect to the AP and configure WiFi + device name via web portal"
     echo ""
     read -p "Monitor serial output? (y/n): " monitor
     if [ "$monitor" = "y" ]; then

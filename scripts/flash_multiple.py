@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Flash multiple ESP8266 devices with the same firmware
-Allows you to flash to multiple USB ports sequentially
+Flash multiple ESP devices with Temperature Sensor or Solar Monitor firmware
+Supports both ESP8266 and ESP32 with automatic project detection
 """
 
 import subprocess
@@ -28,18 +28,26 @@ def list_devices():
         print(f"Error listing devices: {e}")
         return []
 
-def flash_device(port, env='nodemcuv2'):
+def flash_device(port, project_type='temp', env='esp8266'):
     """Flash firmware to a specific device"""
     print(f"\n{'='*60}")
-    print(f"Flashing {port}...")
+    print(f"Flashing {port} with {project_type} firmware...")
     print(f"{'='*60}")
+    
+    # Set build directory based on project type
+    if project_type == 'solar':
+        build_dir = Path(__file__).parent.parent / 'solar-monitor'
+        project_name = 'Solar Monitor'
+    else:
+        build_dir = Path(__file__).parent.parent
+        project_name = 'Temperature Sensor'
     
     try:
         cmd = ['platformio', 'run', '--target', 'upload', '-e', env, '--upload-port', port]
-        result = subprocess.run(cmd, cwd=Path(__file__).parent)
+        result = subprocess.run(cmd, cwd=build_dir)
         
         if result.returncode == 0:
-            print(f"✅ Successfully flashed {port}")
+            print(f"✅ Successfully flashed {port} with {project_name}")
             return True
         else:
             print(f"❌ Failed to flash {port}")
@@ -49,13 +57,23 @@ def flash_device(port, env='nodemcuv2'):
         return False
 
 def main():
-    parser = argparse.ArgumentParser(description='Flash multiple ESP8266 devices')
+    parser = argparse.ArgumentParser(description='Flash multiple ESP devices')
     parser.add_argument('--list', action='store_true', help='List available devices')
     parser.add_argument('--ports', nargs='+', help='Specific ports to flash (e.g., /dev/ttyUSB0 /dev/ttyUSB1)')
     parser.add_argument('--all', action='store_true', help='Flash all detected devices')
-    parser.add_argument('--env', default='nodemcuv2', help='PlatformIO environment (default: nodemcuv2)')
+    parser.add_argument('--project', choices=['temp', 'solar'], default='temp', 
+                       help='Project type: temp (Temperature Sensor) or solar (Solar Monitor)')
+    parser.add_argument('--env', default='auto', 
+                       help='PlatformIO environment (default: auto-detect from project)')
     
     args = parser.parse_args()
+    
+    # Auto-detect environment if not specified
+    if args.env == 'auto':
+        if args.project == 'solar':
+            args.env = 'esp32dev'
+        else:
+            args.env = 'esp8266'
     
     if args.list:
         devices = list_devices()
@@ -76,10 +94,10 @@ def main():
         if not devices:
             sys.exit(1)
         
-        print("\n=== Flash Multiple Devices ===")
+        print(f"\n=== Flash Multiple Devices ({args.project.upper()}) ===")
         print("Options:")
         print("  (A)ll - Flash all devices")
-        print("  (S)elect - Choose specific devices")
+        print("  (S)elect - Choose specific devices") 
         print("  (Q)uit - Exit")
         
         choice = input("\nEnter choice (A/S/Q): ").upper()
@@ -102,9 +120,13 @@ def main():
         print("No devices to flash!")
         sys.exit(1)
     
-    print(f"\n📋 Will flash {len(devices_to_flash)} device(s):")
+    project_name = "Solar Monitor" if args.project == 'solar' else "Temperature Sensor"
+    print(f"\n📋 Will flash {len(devices_to_flash)} device(s) with {project_name}:")
     for i, port in enumerate(devices_to_flash, 1):
         print(f"   {i}. {port}")
+    
+    print(f"\nProject: {project_name}")
+    print(f"Environment: {args.env}")
     
     confirm = input("\nProceed with flashing? (yes/no): ").lower()
     if confirm != 'yes':
@@ -115,7 +137,7 @@ def main():
     results = {}
     for port in devices_to_flash:
         print(f"\n⏳ Flashing device {devices_to_flash.index(port) + 1}/{len(devices_to_flash)}")
-        success = flash_device(port, args.env)
+        success = flash_device(port, args.project, args.env)
         results[port] = success
         
         if success and devices_to_flash.index(port) < len(devices_to_flash) - 1:

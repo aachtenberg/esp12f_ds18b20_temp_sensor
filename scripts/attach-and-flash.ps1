@@ -3,10 +3,13 @@
 
 param(
     [Parameter(Mandatory=$false)]
-    [string]$DeviceName = "",
+    [string]$ProjectType = "temp",
     
     [Parameter(Mandatory=$false)]
-    [string]$Board = "esp8266",
+    [string]$Board = "",
+    
+    [Parameter(Mandatory=$false)]
+    [string]$DeviceName = "",
     
     [Parameter(Mandatory=$false)]
     [string]$BusId = ""
@@ -80,22 +83,23 @@ Start-Sleep -Seconds 2
 
 # Step 4: Get device details if not provided
 if ([string]::IsNullOrEmpty($DeviceName)) {
-    Write-Host "`n[Step 4/5] Select device to flash:" -ForegroundColor Yellow
-    Write-Host "  1. Big Garage (esp8266)" -ForegroundColor Cyan
-    Write-Host "  2. Small Garage (esp8266)" -ForegroundColor Cyan
-    Write-Host "  3. Pump House (esp8266)" -ForegroundColor Cyan
-    Write-Host "  4. Custom device name" -ForegroundColor Cyan
+    Write-Host "`n[Step 4/5] Select project and board to flash:" -ForegroundColor Yellow
+    Write-Host "  1. Temperature Sensor (ESP8266)" -ForegroundColor Cyan
+    Write-Host "  2. Temperature Sensor (ESP32)" -ForegroundColor Cyan
+    Write-Host "  3. Solar Monitor (ESP32)" -ForegroundColor Cyan
+    Write-Host "  4. Custom configuration" -ForegroundColor Cyan
     Write-Host ""
     
     $choice = Read-Host "Enter choice (1-4)"
     
     switch ($choice) {
-        "1" { $DeviceName = "Big Garage"; $Board = "esp8266" }
-        "2" { $DeviceName = "Small Garage"; $Board = "esp8266" }
-        "3" { $DeviceName = "Pump House"; $Board = "esp8266" }
+        "1" { $ProjectType = "temp"; $Board = "esp8266" }
+        "2" { $ProjectType = "temp"; $Board = "esp32" }
+        "3" { $ProjectType = "solar"; $Board = "esp32" }
         "4" { 
-            $DeviceName = Read-Host "Enter device name"
+            $ProjectType = Read-Host "Enter project type (temp/solar)"
             $Board = Read-Host "Enter board type (esp8266/esp32)"
+            $DeviceName = Read-Host "Enter device name (optional, configurable via WiFi portal)"
         }
         default {
             Write-Host "❌ Invalid choice. Exiting.`n" -ForegroundColor Red
@@ -106,10 +110,14 @@ if ([string]::IsNullOrEmpty($DeviceName)) {
 }
 
 # Step 5: Flash device via WSL
-Write-Host "`n[Step 5/5] Flashing '$DeviceName' ($Board)..." -ForegroundColor Yellow
+$projectName = if ($ProjectType -eq "solar") { "Solar Monitor" } else { "Temperature Sensor" }
+Write-Host "`n[Step 5/5] Flashing $projectName ($Board)..." -ForegroundColor Yellow
 Write-Host ""
 
-$wslCommand = "cd /home/aachten/PlatformIO/esp12f_ds18b20_temp_sensor && ./scripts/flash_device.sh '$DeviceName' $Board"
+$wslCommand = "cd /home/aachten/PlatformIO/esp12f_ds18b20_temp_sensor && ./scripts/flash_device.sh $ProjectType $Board"
+if ($DeviceName) {
+    $wslCommand += " '$DeviceName'"
+}
 
 Write-Host "Executing in WSL: $wslCommand" -ForegroundColor Gray
 Write-Host ""
@@ -120,12 +128,13 @@ if ($LASTEXITCODE -eq 0) {
     Write-Host "`n========================================" -ForegroundColor Green
     Write-Host "✅ Flash Complete!" -ForegroundColor Green
     Write-Host "========================================`n" -ForegroundColor Green
-    Write-Host "Device '$DeviceName' has been flashed successfully." -ForegroundColor Green
+    Write-Host "$projectName has been flashed successfully." -ForegroundColor Green
     Write-Host ""
     Write-Host "Next steps:" -ForegroundColor Yellow
     Write-Host "  1. Unplug the ESP device from USB" -ForegroundColor Cyan
     Write-Host "  2. Power it with 5V adapter" -ForegroundColor Cyan
-    Write-Host "  3. Check serial monitor: wsl -e platformio device monitor`n" -ForegroundColor Cyan
+    Write-Host "  3. Configure WiFi and device name via the setup portal" -ForegroundColor Cyan
+    Write-Host "  4. Check serial monitor: wsl -e platformio device monitor`n" -ForegroundColor Cyan
 } else {
     Write-Host "`n❌ Flash failed! Check the errors above.`n" -ForegroundColor Red
 }
