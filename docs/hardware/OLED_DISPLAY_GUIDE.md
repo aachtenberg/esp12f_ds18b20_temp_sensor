@@ -123,8 +123,21 @@ Since OLED isn't integrated into PCB:
 
 | Project | Status | Notes |
 |---------|--------|-------|
-| Solar Monitor | 🔲 Planned | ESP32, hardware I2C on GPIO 21/22 |
+| Solar Monitor | ✅ Code Ready | ESP32, GPIO 21/22. Set `OLED_ENABLED 1` in display.h to enable |
 | Temperature Sensor | 🔲 Planned | ESP8266, I2C on D1/D2 |
+
+## Enabling/Disabling OLED
+
+The OLED display can be enabled or disabled at compile time in `solar-monitor/src/display.h`:
+
+```cpp
+// Set to 0 to disable OLED (when hardware not connected)
+// Set to 1 to enable OLED display
+#define OLED_ENABLED 0
+```
+
+**When to disable:** Hardware not yet connected (causes crash on boot)  
+**When to enable:** OLED display is wired up and ready
 
 ## Library Dependencies
 
@@ -201,5 +214,6 @@ void updateDisplay(int batteryPercent, float voltage, float current, float solar
 ---
 
 **Created**: November 24, 2025  
-**Status**: Planning phase - awaiting display delivery  
+**Updated**: November 25, 2025  
+**Status**: Code complete - awaiting display delivery  
 **Branch**: `feature/oled-display`

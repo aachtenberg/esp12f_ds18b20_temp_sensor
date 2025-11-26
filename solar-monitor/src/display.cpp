@@ -7,6 +7,8 @@
 
 #include "display.h"
 
+#if OLED_ENABLED
+
 // Display instance - SSD1306 128x64 I2C with hardware I2C
 U8G2_SSD1306_128X64_NONAME_F_HW_I2C display(U8G2_R0, /* reset=*/ U8X8_PIN_NONE, DISPLAY_SCL_PIN, DISPLAY_SDA_PIN);
 
@@ -235,3 +237,26 @@ void drawProgressBar(int x, int y, int width, int height, int percent) {
 void nextDisplayPage() {
     currentPage = (DisplayPage)((currentPage + 1) % PAGE_COUNT);
 }
+
+#else // OLED_ENABLED == 0
+
+// ============================================================================
+// Stub functions when OLED is disabled
+// ============================================================================
+
+void initDisplay() {
+    Serial.println("[OLED] Display disabled (OLED_ENABLED=0)");
+}
+
+void updateDisplay(float batteryPercent, float batteryVoltage, float batteryCurrent,
+                   float solarPower1, float solarPower2, bool wifiConnected, const char* ipAddress) {
+    // Do nothing - display disabled
+}
+
+void drawBatteryPage(float percent, float voltage, float current) {}
+void drawSolarPage(float power1, float power2) {}
+void drawSystemPage(bool wifiConnected, const char* ipAddress, unsigned long uptimeMs) {}
+void drawProgressBar(int x, int y, int width, int height, int percent) {}
+void nextDisplayPage() {}
+
+#endif // OLED_ENABLED

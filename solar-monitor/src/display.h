@@ -14,6 +14,13 @@
 #ifndef DISPLAY_H
 #define DISPLAY_H
 
+// ============================================================================
+// OLED Enable/Disable Flag
+// Set to 0 to disable OLED (when hardware not connected)
+// Set to 1 to enable OLED display
+// ============================================================================
+#define OLED_ENABLED 0
+
 #include <Arduino.h>
 #include <U8g2lib.h>
 #include <Wire.h>
