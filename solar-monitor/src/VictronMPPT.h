@@ -47,6 +47,10 @@ public:
      */
     void update();
 
+    // Device identification getters
+    String getProductID() const;        // Returns product ID (e.g., "0xA060")
+    String getSerialNumber() const;     // Returns serial number
+
     // Primary data getters
     float getBatteryVoltage() const;    // Returns volts
     float getChargeCurrent() const;     // Returns amps
@@ -56,6 +60,10 @@ public:
     String getChargeState() const;      // Returns string (OFF, BULK, etc.)
     int getErrorCode() const;           // Returns error code (0 = no error)
     String getErrorString() const;      // Returns human-readable error
+
+    // Load output getters (for models with load output)
+    String getLoadState() const;        // Returns "ON" or "OFF"
+    float getLoadCurrent() const;       // Returns load current in amps
 
     // Yield data getters
     float getYieldToday() const;        // Returns kWh
@@ -80,6 +88,10 @@ private:
     // Convert error code to string
     static String errorCodeToString(int code);
 
+    // Device identification (captured once)
+    String _product_id;         // PID: Product ID
+    String _serial_number;      // SER#: Serial number
+
     // Data storage (raw values from device)
     int32_t _batt_voltage_mv;   // Battery voltage in mV
     int32_t _charge_current_ma; // Charge current in mA
@@ -87,6 +99,10 @@ private:
     int32_t _pv_power_w;        // Panel power in W
     ChargeState _charge_state;  // Charge state
     int _error_code;            // Error code
+
+    // Load output data (for models with load output)
+    String _load_state;         // LOAD: ON or OFF
+    int32_t _load_current_ma;   // IL: Load current in mA
 
     // Yield data (raw values)
     int32_t _yield_today;       // H20: Today's yield in 0.01 kWh

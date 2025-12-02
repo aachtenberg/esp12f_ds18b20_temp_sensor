@@ -32,3 +32,6 @@ Thumbs.db
 compile_commands.json
 .clang_format
 .clang-format copy
+
+# PCB design files
+docs/pcb_design/

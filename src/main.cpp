@@ -30,6 +30,7 @@
 #endif
 #include "secrets.h"
 #include "device_config.h"
+#include "display.h"
 
 // Double Reset Detector configuration
 #define DRD_TIMEOUT 3           // Seconds to wait for second reset
@@ -83,6 +84,7 @@ unsigned long lastTime = 0;
 unsigned long timerDelay = TEMPERATURE_READ_INTERVAL_MS;
 unsigned long lastWiFiCheck = 0;
 const unsigned long WIFI_CHECK_INTERVAL = WIFI_CHECK_INTERVAL_MS;
+unsigned long lastDisplayUpdate = 0;
 
 // Create WebServer object on port 80
 #ifdef ESP32
@@ -479,6 +481,9 @@ void setup() {
   sensors.begin();
   updateTemperatures();
 
+  // Initialize OLED display
+  initDisplay();
+
   // Connect to WiFi
   setupWiFi();
 
@@ -531,5 +536,13 @@ void loop() {
       sendToInfluxDB();
     }
     lastTime = millis();
+  }
+
+  // Update OLED display
+  if (millis() - lastDisplayUpdate >= 1000) {
+    bool wifiConnected = (WiFi.status() == WL_CONNECTED);
+    String ipStr = wifiConnected ? WiFi.localIP().toString() : "";
+    updateDisplay(temperatureC.c_str(), temperatureF.c_str(), wifiConnected, ipStr.c_str());
+    lastDisplayUpdate = millis();
   }
 }

@@ -8,12 +8,16 @@
 
 VictronMPPT::VictronMPPT(Stream* serial)
     : _serial(serial)
+    , _product_id("")
+    , _serial_number("")
     , _batt_voltage_mv(0)
     , _charge_current_ma(0)
     , _pv_voltage_mv(0)
     , _pv_power_w(0)
     , _charge_state(ChargeState::UNKNOWN)
     , _error_code(0)
+    , _load_state("OFF")
+    , _load_current_ma(0)
     , _yield_today(0)
     , _yield_yesterday(0)
     , _yield_total(0)
@@ -64,7 +68,15 @@ void VictronMPPT::parseLine(const String& line) {
     String value = line.substring(tabIndex + 1);
 
     // Parse known fields
-    if (key == "V") {
+    if (key == "PID") {
+        // Product ID (device identification)
+        _product_id = value;
+    }
+    else if (key == "SER#") {
+        // Serial number (device identification)
+        _serial_number = value;
+    }
+    else if (key == "V") {
         // Battery voltage in mV
         _batt_voltage_mv = value.toInt();
         _fieldsReceived++;
@@ -100,6 +112,14 @@ void VictronMPPT::parseLine(const String& line) {
     else if (key == "ERR") {
         // Error code
         _error_code = value.toInt();
+    }
+    else if (key == "LOAD") {
+        // Load output state (ON/OFF)
+        _load_state = value;
+    }
+    else if (key == "IL") {
+        // Load current in mA
+        _load_current_ma = value.toInt();
     }
     else if (key == "H19") {
         // Total yield in 0.01 kWh
@@ -162,6 +182,14 @@ String VictronMPPT::errorCodeToString(int code) {
 
 // Getters - convert raw values to user-friendly units
 
+String VictronMPPT::getProductID() const {
+    return _product_id;
+}
+
+String VictronMPPT::getSerialNumber() const {
+    return _serial_number;
+}
+
 float VictronMPPT::getBatteryVoltage() const {
     return _batt_voltage_mv / 1000.0f;  // mV to V
 }
@@ -192,6 +220,14 @@ int VictronMPPT::getErrorCode() const {
 
 String VictronMPPT::getErrorString() const {
     return errorCodeToString(_error_code);
+}
+
+String VictronMPPT::getLoadState() const {
+    return _load_state;
+}
+
+float VictronMPPT::getLoadCurrent() const {
+    return _load_current_ma / 1000.0f;  // mA to A
 }
 
 float VictronMPPT::getYieldToday() const {

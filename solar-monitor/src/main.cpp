@@ -40,6 +40,7 @@
 #include "VictronSmartShunt.h"
 #include "VictronMPPT.h"
 #include "secrets.h"
+#include "display.h"
 
 // Double Reset Detector configuration
 #define DRD_TIMEOUT 3           // Seconds to wait for second reset
@@ -91,6 +92,7 @@ WebServer server(HTTP_PORT);
 
 // Status tracking
 unsigned long lastStatusPrint = 0;
+unsigned long lastDisplayUpdate = 0;
 unsigned long bootTime = 0;
 
 // ============================================================================
@@ -242,6 +244,9 @@ void setup() {
     mppt1.begin();
     mppt2.begin();
 
+    // Initialize OLED display
+    initDisplay();
+
     // Connect to WiFi
     setupWiFi();
 
@@ -355,6 +360,39 @@ void loop() {
     if (millis() - lastInfluxDBSend >= INFLUXDB_SEND_INTERVAL) {
         sendDataToInfluxDB();
         lastInfluxDBSend = millis();
+    }
+
+    // Update OLED display periodically
+    if (millis() - lastDisplayUpdate >= DISPLAY_UPDATE_INTERVAL) {
+        // Get current data from SmartShunt
+        float batteryPercent = smartShunt.getStateOfCharge();
+        float batteryVoltage = smartShunt.getBatteryVoltage();
+        float batteryCurrent = smartShunt.getBatteryCurrent();
+        
+        // Get solar power from both MPPTs
+        float solarPower1 = mppt1.getPanelPower();
+        float solarPower2 = mppt2.getPanelPower();
+        
+        // Get WiFi status
+        bool wifiConnected = (WiFi.status() == WL_CONNECTED);
+        String ipStr = wifiConnected ? WiFi.localIP().toString() : "";
+        
+        // Build daily stats from MPPTs
+        SolarDailyStats dailyStats;
+        dailyStats.yieldToday1 = mppt1.getYieldToday();
+        dailyStats.yieldToday2 = mppt2.getYieldToday();
+        dailyStats.yieldYesterday1 = mppt1.getYieldYesterday();
+        dailyStats.yieldYesterday2 = mppt2.getYieldYesterday();
+        dailyStats.maxPowerToday1 = mppt1.getMaxPowerToday();
+        dailyStats.maxPowerToday2 = mppt2.getMaxPowerToday();
+        dailyStats.maxPowerYesterday1 = mppt1.getMaxPowerYesterday();
+        dailyStats.maxPowerYesterday2 = mppt2.getMaxPowerYesterday();
+        
+        // Update display
+        updateDisplay(batteryPercent, batteryVoltage, batteryCurrent,
+                     solarPower1, solarPower2, wifiConnected, ipStr.c_str(), &dailyStats);
+        
+        lastDisplayUpdate = millis();
     }
 
     // Small delay to prevent watchdog issues
@@ -511,73 +549,77 @@ void setupWebServer() {
 // ============================================================================
 
 void handleRoot() {
-    String html = R"rawliteral(
-<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Solar Monitor</title>
+    String html = "<!DOCTYPE html><html><head><meta charset=\"UTF-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\"><title>";
+    html += String(deviceName);
+    html += R"rawliteral(</title>
     <style>
-        body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; margin: 20px; background: #f5f5f5; }
-        h1 { color: #333; }
-        .card { background: white; border-radius: 8px; padding: 20px; margin: 15px 0; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
-        .card h2 { margin-top: 0; color: #007AFF; }
-        .card h3 { margin: 15px 0 10px 0; color: #666; font-size: 14px; border-bottom: 1px solid #eee; padding-bottom: 5px; }
-        .stat { display: inline-block; margin: 10px 20px 10px 0; }
-        .stat-value { font-size: 24px; font-weight: bold; color: #333; }
-        .stat-value.total { color: #007AFF; }
-        .stat-label { font-size: 12px; color: #666; text-transform: uppercase; }
-        .status-ok { color: #34C759; }
-        .status-warn { color: #FF9500; }
-        .status-error { color: #FF3B30; }
-        .no-data { color: #999; font-style: italic; }
-        a { color: #007AFF; }
-        .api-links { margin-top: 20px; }
-        .api-links a { display: inline-block; margin-right: 15px; }
-        .mppt-row { display: flex; flex-wrap: wrap; gap: 20px; }
-        .mppt-section { flex: 1; min-width: 280px; }
+        body { margin: 0; padding: 8px; background: #0f172a; font-family: system-ui; color: #e2e8f0; }
+        .container { max-width: 800px; margin: 0 auto; }
+        .header { text-align: center; margin-bottom: 16px; }
+        .title { font-size: 1.3rem; font-weight: 600; color: #94a3b8; margin-bottom: 4px; }
+        .status { font-size: 0.8rem; color: #94a3b8; }
+        .status-indicator { display: inline-block; width: 8px; height: 8px; background: #10b981; border-radius: 50%; margin-right: 4px; animation: pulse 2s infinite; }
+        @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+
+        .card { background: #1e293b; border: 1px solid #334155; border-radius: 12px; padding: 16px; margin-bottom: 12px; }
+        .card-title { font-size: 1.1rem; font-weight: 600; color: #38bdf8; margin-bottom: 12px; text-align: center; }
+
+        .main-display { background: linear-gradient(135deg, #1e3a5f, #0f172a); border: 1px solid #334155; border-radius: 10px; padding: 16px; margin-bottom: 12px; text-align: center; }
+        .main-value { font-size: 3rem; font-weight: 700; color: #38bdf8; }
+        .main-unit { font-size: 0.9rem; color: #94a3b8; margin-left: 4px; }
+
+        .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; }
+        .stat-box { background: #0f172a; border: 1px solid #334155; border-radius: 8px; padding: 10px; text-align: center; }
+        .stat-value { font-size: 1.5rem; font-weight: 700; color: #38bdf8; }
+        .stat-label { font-size: 0.75rem; color: #94a3b8; margin-top: 4px; text-transform: uppercase; }
+
+        .section-title { font-size: 0.85rem; color: #94a3b8; margin: 12px 0 8px 0; padding-bottom: 4px; border-bottom: 1px solid #334155; }
+        .no-data { color: #64748b; font-style: italic; text-align: center; }
+
+        .footer { margin-top: 12px; padding-top: 8px; border-top: 1px solid #334155; font-size: 0.7rem; color: #64748b; text-align: center; }
+        .footer a { color: #38bdf8; text-decoration: none; margin: 0 6px; }
     </style>
 </head>
 <body>
-    <h1>ESP32 Solar Monitor</h1>
-
-    <div class="card">
-        <h2>Battery (SmartShunt)</h2>
-        <div id="battery-data">Loading...</div>
-    </div>
-
-    <div class="card">
-        <h2>Solar (Combined)</h2>
-        <div id="solar-total">Loading...</div>
-        <div class="mppt-row">
-            <div class="mppt-section">
-                <h3>MPPT 1</h3>
-                <div id="mppt1-data">Loading...</div>
-            </div>
-            <div class="mppt-section">
-                <h3>MPPT 2</h3>
-                <div id="mppt2-data">Loading...</div>
-            </div>
+    <div class="container">
+        <div class="header">
+            <div class="title">)rawliteral";
+    html += String(deviceName);
+    html += R"rawliteral(</div>
+            <div class="status"><span class="status-indicator"></span>Live</div>
         </div>
-    </div>
 
-    <div class="api-links">
-        <strong>API Endpoints:</strong>
-        <a href="/api/battery">/api/battery</a>
-        <a href="/api/solar">/api/solar</a>
-        <a href="/api/system">/api/system</a>
+        <div class="card">
+            <div class="card-title">Battery (SmartShunt)</div>
+            <div id="battery-data">Loading...</div>
+        </div>
+
+        <div class="card">
+            <div class="card-title">Solar Production</div>
+            <div id="solar-total">Loading...</div>
+            <div class="section-title">MPPT 1</div>
+            <div id="mppt1-data">Loading...</div>
+            <div class="section-title">MPPT 2</div>
+            <div id="mppt2-data">Loading...</div>
+        </div>
+
+        <div class="footer">
+            <a href="/api/battery">Battery API</a>
+            <a href="/api/solar">Solar API</a>
+            <a href="/api/system">System API</a>
+        </div>
     </div>
 
     <script>
         function renderMppt(mppt) {
-            if (!mppt || !mppt.valid) return '<span class="no-data">No data</span>';
+            if (!mppt || !mppt.valid) return '<div class="no-data">No data available</div>';
             return `
-                <div class="stat"><div class="stat-value">${mppt.pv_voltage.toFixed(1)} V</div><div class="stat-label">Panel V</div></div>
-                <div class="stat"><div class="stat-value">${mppt.pv_power.toFixed(0)} W</div><div class="stat-label">Power</div></div>
-                <div class="stat"><div class="stat-value">${mppt.charge_current.toFixed(2)} A</div><div class="stat-label">Current</div></div>
-                <div class="stat"><div class="stat-value">${mppt.charge_state}</div><div class="stat-label">State</div></div>
-                <div class="stat"><div class="stat-value">${mppt.yield_today.toFixed(2)} kWh</div><div class="stat-label">Today</div></div>
+                <div class="stats-grid">
+                    <div class="stat-box"><div class="stat-value">${mppt.pv_power.toFixed(0)}</div><div class="stat-label">Watts</div></div>
+                    <div class="stat-box"><div class="stat-value">${mppt.pv_voltage.toFixed(1)}</div><div class="stat-label">Panel V</div></div>
+                    <div class="stat-box"><div class="stat-value">${mppt.charge_current.toFixed(2)}</div><div class="stat-label">Current A</div></div>
+                    <div class="stat-box"><div class="stat-value">${mppt.yield_today.toFixed(2)}</div><div class="stat-label">Today kWh</div></div>
+                </div>
             `;
         }
 
@@ -589,13 +631,17 @@ void handleRoot() {
                     let battHtml = '';
                     if (data.battery && data.battery.valid) {
                         battHtml = `
-                            <div class="stat"><div class="stat-value">${data.battery.voltage.toFixed(2)} V</div><div class="stat-label">Voltage</div></div>
-                            <div class="stat"><div class="stat-value">${data.battery.current.toFixed(2)} A</div><div class="stat-label">Current</div></div>
-                            <div class="stat"><div class="stat-value">${data.battery.soc.toFixed(1)}%</div><div class="stat-label">State of Charge</div></div>
-                            <div class="stat"><div class="stat-value">${data.battery.time_remaining} min</div><div class="stat-label">Time Remaining</div></div>
+                            <div class="main-display">
+                                <div><span class="main-value">${data.battery.soc.toFixed(1)}</span><span class="main-unit">%</span></div>
+                            </div>
+                            <div class="stats-grid">
+                                <div class="stat-box"><div class="stat-value">${data.battery.voltage.toFixed(1)}</div><div class="stat-label">Voltage</div></div>
+                                <div class="stat-box"><div class="stat-value">${data.battery.current.toFixed(1)}</div><div class="stat-label">Current A</div></div>
+                                <div class="stat-box"><div class="stat-value">${data.battery.time_remaining}</div><div class="stat-label">Time min</div></div>
+                            </div>
                         `;
                     } else {
-                        battHtml = '<span class="no-data">No data from SmartShunt</span>';
+                        battHtml = '<div class="no-data">No data from SmartShunt</div>';
                     }
                     document.getElementById('battery-data').innerHTML = battHtml;
 
@@ -603,12 +649,16 @@ void handleRoot() {
                     let totalHtml = '';
                     if (data.solar && data.solar.valid) {
                         totalHtml = `
-                            <div class="stat"><div class="stat-value total">${data.solar.pv_power.toFixed(0)} W</div><div class="stat-label">Total Power</div></div>
-                            <div class="stat"><div class="stat-value total">${data.solar.charge_current.toFixed(2)} A</div><div class="stat-label">Total Current</div></div>
-                            <div class="stat"><div class="stat-value total">${data.solar.yield_today.toFixed(2)} kWh</div><div class="stat-label">Total Today</div></div>
+                            <div class="main-display">
+                                <div><span class="main-value">${data.solar.pv_power.toFixed(0)}</span><span class="main-unit">W</span></div>
+                            </div>
+                            <div class="stats-grid">
+                                <div class="stat-box"><div class="stat-value">${data.solar.charge_current.toFixed(2)}</div><div class="stat-label">Current A</div></div>
+                                <div class="stat-box"><div class="stat-value">${data.solar.yield_today.toFixed(2)}</div><div class="stat-label">Total Today kWh</div></div>
+                            </div>
                         `;
                     } else {
-                        totalHtml = '<span class="no-data">No solar data</span>';
+                        totalHtml = '<div class="no-data">No solar data</div>';
                     }
                     document.getElementById('solar-total').innerHTML = totalHtml;
 
@@ -656,6 +706,8 @@ void handleSolarData() {
 
     // MPPT1 data
     JsonObject mppt1Data = doc.createNestedObject("mppt1");
+    mppt1Data["product_id"] = mppt1.getProductID();
+    mppt1Data["serial_number"] = mppt1.getSerialNumber();
     mppt1Data["pv_voltage"] = mppt1.getPanelVoltage();
     mppt1Data["pv_power"] = mppt1.getPanelPower();
     mppt1Data["battery_voltage"] = mppt1.getBatteryVoltage();
@@ -663,6 +715,8 @@ void handleSolarData() {
     mppt1Data["charge_state"] = mppt1.getChargeState();
     mppt1Data["error_code"] = mppt1.getErrorCode();
     mppt1Data["error_string"] = mppt1.getErrorString();
+    mppt1Data["load_state"] = mppt1.getLoadState();
+    mppt1Data["load_current"] = mppt1.getLoadCurrent();
     mppt1Data["yield_today"] = mppt1.getYieldToday();
     mppt1Data["yield_yesterday"] = mppt1.getYieldYesterday();
     mppt1Data["yield_total"] = mppt1.getYieldTotal();
@@ -673,6 +727,8 @@ void handleSolarData() {
 
     // MPPT2 data
     JsonObject mppt2Data = doc.createNestedObject("mppt2");
+    mppt2Data["product_id"] = mppt2.getProductID();
+    mppt2Data["serial_number"] = mppt2.getSerialNumber();
     mppt2Data["pv_voltage"] = mppt2.getPanelVoltage();
     mppt2Data["pv_power"] = mppt2.getPanelPower();
     mppt2Data["battery_voltage"] = mppt2.getBatteryVoltage();
@@ -680,6 +736,8 @@ void handleSolarData() {
     mppt2Data["charge_state"] = mppt2.getChargeState();
     mppt2Data["error_code"] = mppt2.getErrorCode();
     mppt2Data["error_string"] = mppt2.getErrorString();
+    mppt2Data["load_state"] = mppt2.getLoadState();
+    mppt2Data["load_current"] = mppt2.getLoadCurrent();
     mppt2Data["yield_today"] = mppt2.getYieldToday();
     mppt2Data["yield_yesterday"] = mppt2.getYieldYesterday();
     mppt2Data["yield_total"] = mppt2.getYieldTotal();
@@ -692,6 +750,7 @@ void handleSolarData() {
     JsonObject totals = doc.createNestedObject("totals");
     totals["pv_power"] = mppt1.getPanelPower() + mppt2.getPanelPower();
     totals["charge_current"] = mppt1.getChargeCurrent() + mppt2.getChargeCurrent();
+    totals["load_current"] = mppt1.getLoadCurrent() + mppt2.getLoadCurrent();
     totals["yield_today"] = mppt1.getYieldToday() + mppt2.getYieldToday();
     totals["yield_yesterday"] = mppt1.getYieldYesterday() + mppt2.getYieldYesterday();
 
@@ -875,14 +934,27 @@ void sendDataToInfluxDB() {
     if (mppt1.isDataValid()) {
         String deviceTag = String(deviceName);
         deviceTag.replace(" ", "_");
-        
-        data += "solar,device=" + deviceTag + ",location=garage,mppt=1 ";
+
+        // Add product_id and serial as tags if available
+        String tags = "solar,device=" + deviceTag + ",location=garage,mppt=1";
+        if (mppt1.getProductID().length() > 0) {
+            tags += ",product_id=" + mppt1.getProductID();
+        }
+        if (mppt1.getSerialNumber().length() > 0) {
+            String serial = mppt1.getSerialNumber();
+            serial.replace(" ", "_");
+            tags += ",serial=" + serial;
+        }
+
+        data += tags + " ";
         data += "pv_voltage=" + String(mppt1.getPanelVoltage(), 3) + ",";
         data += "pv_power=" + String(mppt1.getPanelPower(), 1) + ",";
         data += "battery_voltage=" + String(mppt1.getBatteryVoltage(), 3) + ",";
         data += "charge_current=" + String(mppt1.getChargeCurrent(), 3) + ",";
         data += "charge_state=\"" + mppt1.getChargeState() + "\",";
         data += "error_code=" + String(mppt1.getErrorCode()) + ",";
+        data += "load_state=\"" + mppt1.getLoadState() + "\",";
+        data += "load_current=" + String(mppt1.getLoadCurrent(), 3) + ",";
         data += "yield_today=" + String(mppt1.getYieldToday(), 3) + ",";
         data += "yield_yesterday=" + String(mppt1.getYieldYesterday(), 3) + ",";
         data += "yield_total=" + String(mppt1.getYieldTotal(), 3) + ",";
@@ -895,14 +967,27 @@ void sendDataToInfluxDB() {
     if (mppt2.isDataValid()) {
         String deviceTag = String(deviceName);
         deviceTag.replace(" ", "_");
-        
-        data += "solar,device=" + deviceTag + ",location=garage,mppt=2 ";
+
+        // Add product_id and serial as tags if available
+        String tags = "solar,device=" + deviceTag + ",location=garage,mppt=2";
+        if (mppt2.getProductID().length() > 0) {
+            tags += ",product_id=" + mppt2.getProductID();
+        }
+        if (mppt2.getSerialNumber().length() > 0) {
+            String serial = mppt2.getSerialNumber();
+            serial.replace(" ", "_");
+            tags += ",serial=" + serial;
+        }
+
+        data += tags + " ";
         data += "pv_voltage=" + String(mppt2.getPanelVoltage(), 3) + ",";
         data += "pv_power=" + String(mppt2.getPanelPower(), 1) + ",";
         data += "battery_voltage=" + String(mppt2.getBatteryVoltage(), 3) + ",";
         data += "charge_current=" + String(mppt2.getChargeCurrent(), 3) + ",";
         data += "charge_state=\"" + mppt2.getChargeState() + "\",";
         data += "error_code=" + String(mppt2.getErrorCode()) + ",";
+        data += "load_state=\"" + mppt2.getLoadState() + "\",";
+        data += "load_current=" + String(mppt2.getLoadCurrent(), 3) + ",";
         data += "yield_today=" + String(mppt2.getYieldToday(), 3) + ",";
         data += "yield_yesterday=" + String(mppt2.getYieldYesterday(), 3) + ",";
         data += "yield_total=" + String(mppt2.getYieldTotal(), 3) + ",";
