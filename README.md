@@ -5,6 +5,7 @@ Multi-device IoT monitoring platform for ESP32/ESP8266 with InfluxDB data loggin
 ## Table of Contents
 - [Overview](#overview)
 - [Quick Start](#quick-start)
+- [Surveillance Camera](#surveillance-camera)
 - [Temperature Sensor Project](#temperature-sensor-project)
 - [Solar Monitor Project](#solar-monitor-project)
 - [Configuration](#configuration)
@@ -82,6 +83,7 @@ cp include/secrets.h.example include/secrets.h
 ### 4. Access Dashboard
 
 - **Device Web UI**: http://device-ip
+- **Surveillance UI**: See `surveillance/README.md` for `/stream` and presets
 - **Grafana**: http://raspberry-pi:3000
 - **InfluxDB**: http://raspberry-pi:8086
 
@@ -148,6 +150,12 @@ GND → GND                 GND → GND
 │  192.168.1.50  │
 └────────────────┘
 ```
+
+---
+
+## Surveillance Camera
+
+See `surveillance/README.md` for setup, `/stream` endpoint, UI presets (Smooth/Balanced/Detail), and MQTT commands (`restart`, `capture`, status publishing).
 
 ---
 
@@ -344,14 +352,14 @@ static const char* INFLUXDB_BUCKET = "sensor_data";
 
 ```
 ├── src/                    # Temperature sensor firmware
+├── surveillance/           # ESP32-S3 camera module (web + MQTT)
+│   ├── src/               # Camera streaming + MQTT
+│   └── README.md          # Usage, endpoints, presets
 ├── solar-monitor/          # Solar monitor firmware
 │   └── src/               # Solar-specific code
 ├── include/                # Shared headers (secrets, config)
-├── docs/                   # Documentation
-│   ├── pcb_design/        # Custom PCB designs
-│   ├── hardware/          # Hardware guides
-│   ├── solar-monitor/     # Solar documentation
-│   └── reference/         # Reference docs
+├── docs/                   # Documentation (reference + hardware)
+│   └── reference/         # Platform + configuration guides
 ├── scripts/                # Flash and deployment scripts
 ├── platformio.ini          # Build configuration
 └── README.md              # This file

@@ -1,0 +1,36 @@
+#ifndef DEVICE_CONFIG_H
+#define DEVICE_CONFIG_H
+
+// Device identification
+#define DEVICE_NAME "ESP32-S3-Surveillance"
+#define FIRMWARE_VERSION "1.0.0"
+
+// WiFi settings
+#define WIFI_CONNECT_TIMEOUT 30000  // 30 seconds
+#define WIFI_RECONNECT_INTERVAL 60000  // 1 minute
+
+// MQTT settings
+#define MQTT_PORT 1883
+#define MQTT_RECONNECT_INTERVAL 5000  // 5 seconds
+
+// MQTT Topics
+#define MQTT_TOPIC_STATUS "surveillance/status"
+#define MQTT_TOPIC_IMAGE "surveillance/image"
+#define MQTT_TOPIC_MOTION "surveillance/motion"
+#define MQTT_TOPIC_COMMAND "surveillance/command"
+
+// Image capture settings
+#define CAPTURE_INTERVAL 60000  // Capture every 60 seconds (configurable)
+#define MOTION_DETECTION_ENABLED true
+
+// Web server settings
+#define WEB_SERVER_PORT 80
+
+// Status LED (if available)
+#define STATUS_LED_PIN 2
+
+// Double reset detector
+#define DRD_TIMEOUT 10
+#define DRD_ADDRESS 0x00
+
+#endif // DEVICE_CONFIG_H
