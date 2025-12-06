@@ -56,8 +56,8 @@ Backend infrastructure: [raspberry-pi-docker](https://github.com/aachtenberg/ras
 ### 1. Setup Credentials
 
 ```bash
-# Create secrets file
-cp include/secrets.h.example include/secrets.h
+# Create secrets file for temperature sensor
+cp temperature-sensor/include/secrets.h.example temperature-sensor/include/secrets.h
 # Edit with your InfluxDB URL, token, org, and bucket
 ```
 
@@ -321,7 +321,7 @@ static const char* INFLUXDB_BUCKET = "sensor_data";
 
 ### Optional: Enable/Disable OLED
 
-**Temperature Sensor** - Edit `include/display.h`:
+**Temperature Sensor** - Edit `temperature-sensor/include/display.h`:
 ```cpp
 #define OLED_ENABLED 1  // Set to 0 to disable
 ```
@@ -574,8 +574,8 @@ static const char* INFLUXDB_BUCKET = "sensor_data";
 
 **"secrets.h not found":**
 ```bash
-cp include/secrets.h.example include/secrets.h
-# Edit include/secrets.h with your credentials
+cp temperature-sensor/include/secrets.h.example temperature-sensor/include/secrets.h
+# Edit temperature-sensor/include/secrets.h with your credentials
 ```
 
 **"OLED_ENABLED not defined":**

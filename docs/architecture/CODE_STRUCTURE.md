@@ -1,6 +1,6 @@
 # 🔧 Code Structure & Implementation Details
 
-## Main Firmware (`src/main.cpp`)
+## Main Firmware (`temperature-sensor/src/main.cpp`)
 
 ### Overview
 - **520+ lines** of fully commented C++
@@ -543,5 +543,5 @@ Lambda Response 404: {"message": "Not Found"}
 
 ---
 
-For implementation details, see `src/main.cpp` (full source code).  
-For configuration, edit `include/secrets.h` before building.
+For implementation details, see `temperature-sensor/src/main.cpp` (full source code).  
+For configuration, edit `temperature-sensor/include/secrets.h` before building.

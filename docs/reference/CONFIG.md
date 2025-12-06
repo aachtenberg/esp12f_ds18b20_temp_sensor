@@ -3,7 +3,7 @@
 ## Required Files
 
 ### secrets.h Setup
-Create `include/secrets.h` (excluded from git):
+Create `temperature-sensor/include/secrets.h` (excluded from git):
 ```cpp
 #ifndef SECRETS_H
 #define SECRETS_H
