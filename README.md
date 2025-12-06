@@ -1,6 +1,6 @@
 # ESP Sensor Hub
 
-Multi-device IoT monitoring platform for ESP32/ESP8266 with InfluxDB data logging and optional OLED displays.
+Multi-device IoT monitoring platform for ESP32/ESP8266/ESP32-S3 with InfluxDB data logging, MQTT integration, and optional OLED displays.
 
 ## Table of Contents
 - [Overview](#overview)

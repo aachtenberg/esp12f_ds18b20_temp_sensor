@@ -37,6 +37,9 @@ static const char* DEVICE_NAME = ""; // Leave empty to use portal configuration
 
 # Solar monitor  
 ./scripts/flash_device.sh solar
+
+# Surveillance camera
+./scripts/flash_device.sh surveillance
 ```
 
 ### Flash Multiple Devices
