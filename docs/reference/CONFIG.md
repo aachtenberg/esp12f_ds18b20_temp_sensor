@@ -3,7 +3,7 @@
 ## Required Files
 
 ### secrets.h Setup
-Create `include/secrets.h` (excluded from git):
+Create `temperature-sensor/include/secrets.h` (excluded from git):
 ```cpp
 #ifndef SECRETS_H
 #define SECRETS_H
@@ -37,6 +37,9 @@ static const char* DEVICE_NAME = ""; // Leave empty to use portal configuration
 
 # Solar monitor  
 ./scripts/flash_device.sh solar
+
+# Surveillance camera
+./scripts/flash_device.sh surveillance
 ```
 
 ### Flash Multiple Devices

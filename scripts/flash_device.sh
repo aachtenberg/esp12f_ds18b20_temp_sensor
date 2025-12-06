@@ -42,8 +42,12 @@ if [ "$PROJECT_TYPE" = "solar" ]; then
     BUILD_DIR="$PROJECT_DIR/solar-monitor"
     DEFAULT_BOARD="esp32"
     PROJECT_NAME="Solar Monitor"
+elif [ "$PROJECT_TYPE" = "surveillance" ]; then
+    BUILD_DIR="$PROJECT_DIR/surveillance"
+    DEFAULT_BOARD="esp32s3"
+    PROJECT_NAME="Surveillance Camera"
 else
-    BUILD_DIR="$PROJECT_DIR"
+    BUILD_DIR="$PROJECT_DIR/temperature-sensor"
     DEFAULT_BOARD="esp8266" 
     PROJECT_NAME="Temperature Sensor"
 fi

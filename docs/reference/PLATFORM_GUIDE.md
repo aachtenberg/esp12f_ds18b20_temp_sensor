@@ -2,7 +2,7 @@
 
 ## Overview
 
-Self-hosted IoT platform supporting temperature sensors (ESP8266/ESP32) and solar monitoring (ESP32) with WiFiManager portal configuration, InfluxDB time-series storage, and Grafana visualization.
+Self-hosted IoT platform supporting temperature sensors (ESP8266/ESP32), solar monitoring (ESP32), and surveillance cameras (ESP32-S3) with WiFiManager portal configuration, InfluxDB time-series storage, MQTT integration, and Grafana visualization.
 
 ## Quick Start
 
@@ -13,6 +13,9 @@ Self-hosted IoT platform supporting temperature sensors (ESP8266/ESP32) and sola
 
 # Solar monitor (ESP32 only)  
 ./scripts/flash_device.sh solar
+
+# Surveillance camera (ESP32-S3)
+./scripts/flash_device.sh surveillance
 ```
 
 ### 2. Configure via WiFiManager
