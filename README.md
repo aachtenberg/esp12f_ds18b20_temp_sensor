@@ -32,7 +32,7 @@ Multi-device IoT monitoring platform for ESP32/ESP8266/ESP32-S3 with InfluxDB da
 ### System Architecture
 
 ```
-ESP Devices → Raspberry Pi (192.168.0.167)
+ESP Devices → Raspberry Pi (e.g., your-pi.local)
               ├── InfluxDB (data storage)
               ├── Grafana (dashboards)
               ├── Home Assistant (automation)
@@ -52,7 +52,7 @@ Backend infrastructure: [raspberry-pi-docker](https://github.com/aachtenberg/ras
 ---
 
 ## Quick Start
-
+ESP Devices → Raspberry Pi (e.g., your-pi.local)
 ### 1. Setup Credentials
 
 ```bash
@@ -63,22 +63,13 @@ cp temperature-sensor/include/secrets.h.example temperature-sensor/include/secre
 
 ### 2. Flash Device
 
-```bash
+|  device-ip     │
 # Temperature sensor
 ./scripts/flash_device.sh temp
 
 # Solar monitor
-./scripts/flash_device.sh solar
-```
-
-### 3. Configure WiFi
-
 1. Device creates AP: "ESP-Setup" or "Temp-{Name}-Setup"
 2. Connect to AP and open http://192.168.4.1
-3. Enter WiFi credentials and device name
-4. Device connects and starts logging data
-
-**Reconfigure**: Double-reset device within 3 seconds to re-enter portal
 
 ### 4. Access Dashboard
 
@@ -100,6 +91,7 @@ cp temperature-sensor/include/secrets.h.example temperature-sensor/include/secre
 | Display (optional) | SSD1306 OLED 128x64 | I2C interface |
 | Power | USB 5V or custom PCB | PCB design available |
 
+│  MPPT2: 2.6kWh │      │  device-ip     │
 ### Wiring
 
 **DS18B20 Connection:**
@@ -111,7 +103,7 @@ GND → DS18B20 GND
 
 **OLED Display (Optional):**
 ```
-ESP8266 (NodeMCU):        ESP32:
+static const char* INFLUXDB_URL = "http://your-pi:8086";
 D1 (GPIO 5) → SCL         GPIO 22 → SCL
 D2 (GPIO 4) → SDA         GPIO 21 → SDA
 3.3V → VCC                3.3V → VCC
@@ -147,13 +139,11 @@ GND → GND                 GND → GND
 │    74.3°F      │
 │                │
 │  WiFi: ◉       │
-│  192.168.1.50  │
+│  device-ip     │
 └────────────────┘
 ```
 
 ---
-
-## Surveillance Camera
 
 See `surveillance/README.md` for setup, `/stream` endpoint, UI presets (Smooth/Balanced/Detail), and MQTT commands (`restart`, `capture`, status publishing).
 
@@ -191,22 +181,15 @@ All VE.Direct GND (black) → ESP32 GND
 GPIO 21 → SDA
 GPIO 22 → SCL
 3.3V → VCC
-GND → GND
-```
 
 **Power:**
 ```
-12V Battery → Inline Fuse (5A) → 12V-to-5V Converter → ESP32 VIN
 Battery GND → Converter GND → ESP32 GND
 ```
 
 ### Monitored Data
 
 **SmartShunt:**
-- Battery voltage, current, power
-- State of charge (SOC %)
-- Time to go (TTG)
-- Consumed Ah, charge cycles
 - Historical min/max voltage
 
 **MPPT Controllers:**
@@ -215,43 +198,22 @@ Battery GND → Converter GND → ESP32 GND
 - Daily/total yield statistics
 - Error monitoring
 
-### Display Pages
-
-OLED cycles through 5 pages:
-
-```
 Page 1: Battery          Page 2: MPPT1           Page 3: MPPT2
 ┌────────────────┐      ┌────────────────┐      ┌────────────────┐
-│   BATTERY      │      │    MPPT 1      │      │    MPPT 2      │
-│     85%        │      │    BULK        │      │    FLOAT       │
-│  ████████░░    │      │  18.6V  145W   │      │  19.2V  156W   │
-│ 12.8V  -2.3A   │      │  Yield: 2.3kWh │      │  Yield: 2.5kWh │
-│ Solar:  301W   │      └────────────────┘      └────────────────┘
-└────────────────┘
 
-Page 4: Daily Stats      Page 5: System
 ┌────────────────┐      ┌────────────────┐
 │  DAILY STATS   │      │     SYSTEM     │
 │  Total: 4.9kWh │      │  Uptime: 2d4h  │
-│  MPPT1: 2.3kWh │      │  WiFi: -45dBm  │
-│  MPPT2: 2.6kWh │      │  192.168.1.51  │
-│  Peak:  525W   │      │  Mem: 45% free │
+│  MPPT2: 2.6kWh │      │  device-ip     │
 └────────────────┘      └────────────────┘
 ```
 
 ### API Endpoints
 
 | Endpoint | Description |
-|----------|-------------|
-| `/` | HTML dashboard |
-| `/api/battery` | SmartShunt data (JSON) |
-| `/api/solar` | Both MPPTs data (JSON) |
-| `/api/system` | Combined system status (JSON) |
-
 **Example `/api/battery` Response:**
 ```json
 {
-  "voltage": 13.25,
   "current": -2.34,
   "soc": 85.0,
   "time_remaining": 240,
@@ -311,7 +273,7 @@ Create `temperature-sensor/include/secrets.h`:
 #ifndef SECRETS_H
 #define SECRETS_H
 
-static const char* INFLUXDB_URL = "http://192.168.0.167:8086";
+static const char* INFLUXDB_URL = "http://your-pi:8086";
 static const char* INFLUXDB_TOKEN = "your-influxdb-token-here";
 static const char* INFLUXDB_ORG = "your-org";
 static const char* INFLUXDB_BUCKET = "sensor_data";
@@ -380,7 +342,7 @@ static const char* INFLUXDB_BUCKET = "sensor_data";
                        │ HTTP POST /api/v2/write
                        ↓
     ┌──────────────────────────────────────────────────┐
-    │         Raspberry Pi 4 (192.168.0.167)          │
+    │         Raspberry Pi 4 (e.g., your-pi.local)    │
     │                                                  │
     │  ┌──────────────┐         ┌──────────────┐     │
     │  │  InfluxDB    │  ←───   │   Grafana    │     │
@@ -724,4 +686,4 @@ Custom USB-powered temperature sensor board (v1.0):
 **Last Updated**: December 2, 2025
 **Status**: Both projects operational
 **Branch**: `feature/oled-display`
-**Backend**: Raspberry Pi 4 @ 192.168.0.167
+**Backend**: Raspberry Pi 4 @ your-pi.local
