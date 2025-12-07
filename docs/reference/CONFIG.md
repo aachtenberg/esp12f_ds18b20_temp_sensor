@@ -112,8 +112,8 @@ from(bucket: "sensor_data")
 4. Test InfluxDB connectivity: `curl http://your-pi:8086/ping`
 
 ### Compilation Errors
-1. Ensure `include/secrets.h` exists
-2. Copy from `include/secrets.h.example` if needed
+1. Ensure `temperature-sensor/include/secrets.h` exists
+2. Copy from `temperature-sensor/include/secrets.h.example` if needed
 3. Verify all required credentials are set
 4. Check PlatformIO environment matches project type
 

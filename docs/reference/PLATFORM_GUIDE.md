@@ -63,7 +63,7 @@ Self-hosted IoT platform supporting temperature sensors (ESP8266/ESP32), solar m
 ## Configuration
 
 ### Secrets Setup
-Create `include/secrets.h` (excluded from git):
+Create `temperature-sensor/include/secrets.h` (excluded from git):
 ```cpp
 static const char* INFLUXDB_URL = "http://192.168.1.100:8086";
 static const char* INFLUXDB_TOKEN = "your-influxdb-token";  

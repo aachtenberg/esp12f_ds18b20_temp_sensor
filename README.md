@@ -305,7 +305,7 @@ Page 4: Daily Stats      Page 5: System
 
 ### Required: InfluxDB Credentials
 
-Create `include/secrets.h`:
+Create `temperature-sensor/include/secrets.h`:
 
 ```cpp
 #ifndef SECRETS_H
@@ -351,13 +351,13 @@ static const char* INFLUXDB_BUCKET = "sensor_data";
 ### Project Structure
 
 ```
-├── src/                    # Temperature sensor firmware
+├── temperature-sensor/     # Temp sensor firmware (includes its own include/ and lib/)
+│   └── src/
 ├── surveillance/           # ESP32-S3 camera module (web + MQTT)
 │   ├── src/               # Camera streaming + MQTT
 │   └── README.md          # Usage, endpoints, presets
 ├── solar-monitor/          # Solar monitor firmware
 │   └── src/               # Solar-specific code
-├── include/                # Shared headers (secrets, config)
 ├── docs/                   # Documentation (reference + hardware)
 │   └── reference/         # Platform + configuration guides
 ├── scripts/                # Flash and deployment scripts
