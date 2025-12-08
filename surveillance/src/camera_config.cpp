@@ -24,18 +24,34 @@ camera_config_t getCameraConfig() {
     config.xclk_freq_hz = CAMERA_XCLK_FREQ;
     config.pixel_format = PIXFORMAT_JPEG;
 
-    // Optimized settings for responsive web streaming
-    if(psramFound()){
-        config.frame_size = FRAMESIZE_SVGA;  // 800x600 - high quality streaming
-        config.jpeg_quality = 12;  // 0-63 lower means higher quality (12 for speed at high res)
-        config.fb_count = CAMERA_FB_COUNT;
-        Serial.println("PSRAM found - using SVGA streaming settings");
-    } else {
-        config.frame_size = FRAMESIZE_HVGA;  // 480x320
-        config.jpeg_quality = 15;
-        config.fb_count = 1;
-        Serial.println("PSRAM not found - using reduced settings");
-    }
+    // Per-board tuning: keep S3 high-res, bias ESP32-CAM for speed/latency
+    #if defined(CAMERA_MODEL_ESP32S3_EYE)
+        // S3 board: keep higher res the same as before
+        if (psramFound()) {
+            config.frame_size = FRAMESIZE_SVGA;  // 800x600 - high quality streaming
+            config.jpeg_quality = 12;             // 0-63 lower means higher quality (12 for speed at high res)
+            config.fb_count = CAMERA_FB_COUNT;
+            Serial.println("PSRAM found (S3) - using SVGA streaming settings");
+        } else {
+            config.frame_size = FRAMESIZE_HVGA;  // 480x320
+            config.jpeg_quality = 15;
+            config.fb_count = 1;
+            Serial.println("PSRAM not found (S3) - using reduced settings");
+        }
+    #else
+        // AI-Thinker ESP32-CAM: favor faster frame time and lower bandwidth
+        if (psramFound()) {
+            config.frame_size = FRAMESIZE_VGA;  // 640x480 for quicker captures/stream
+            config.jpeg_quality = 12;
+            config.fb_count = 2;                // double buffering for smoother stream
+            Serial.println("PSRAM found (ESP32-CAM) - using VGA speed profile");
+        } else {
+            config.frame_size = FRAMESIZE_QVGA; // 320x240 when PSRAM missing
+            config.jpeg_quality = 14;
+            config.fb_count = 1;
+            Serial.println("PSRAM not found (ESP32-CAM) - using QVGA fallback");
+        }
+    #endif
 
     config.fb_location = CAMERA_FB_IN_PSRAM;
     config.grab_mode = CAMERA_GRAB_LATEST;  // Always get latest frame for live streaming

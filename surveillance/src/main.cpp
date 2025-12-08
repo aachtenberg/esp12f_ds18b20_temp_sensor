@@ -8,9 +8,29 @@
 #include <InfluxDbClient.h>
 #include <InfluxDbCloud.h>
 #include <base64.h>
+#include <ESP_DoubleResetDetector.h>
+#include <LittleFS.h>
 #include "camera_config.h"
 #include "device_config.h"
 #include "secrets.h"
+
+// Double Reset Detector configuration
+#define DRD_TIMEOUT 3
+#define DRD_ADDRESS 0
+
+// Create Double Reset Detector instance
+DoubleResetDetector* drd;
+
+// Device name storage
+char deviceName[40] = "Surveillance Cam";
+const char* DEVICE_NAME_FILE = "/device_name.txt";
+
+// Motion detection config
+const char* MOTION_CONFIG_FILE = "/motion_config.txt";
+bool motionEnabled = true;  // Default enabled
+unsigned long motionDetectCount = 0;
+volatile bool motionDetected = false;
+unsigned long lastMotionTime = 0;
 
 // Global objects
 WiFiClient espClient;
@@ -40,6 +60,11 @@ unsigned long cameraErrors = 0;
 unsigned long mqttPublishCount = 0;
 
 // Function declarations
+void loadDeviceName();
+void saveDeviceName(const char* name);
+void loadMotionConfig();
+void saveMotionConfig(bool enabled);
+void IRAM_ATTR motionISR();
 void setupWiFi();
 void setupCamera();
 void setupMQTT();
@@ -56,15 +81,32 @@ void handleRoot(AsyncWebServerRequest *request);
 void handleCapture(AsyncWebServerRequest *request);
 void handleStream(AsyncWebServerRequest *request);
 void handleControl(AsyncWebServerRequest *request);
+void handleMotionControl(AsyncWebServerRequest *request);
+void handleMotionDetection();
 
 void setup() {
     Serial.begin(115200);
-    delay(1000);
+    delay(2000);  // Extra delay to stabilize serial
 
     Serial.println("\n\n");
     Serial.println("========================================");
     Serial.printf("%s v%s\n", DEVICE_NAME, FIRMWARE_VERSION);
     Serial.println("========================================");
+    Serial.println("[SETUP] Starting initialization...");
+
+    // Load device name from filesystem
+    Serial.println("[SETUP] Loading device name...");
+    loadDeviceName();
+
+    // Load motion config
+    Serial.println("[SETUP] Loading motion config...");
+    loadMotionConfig();
+
+    // Setup PIR motion sensor
+    pinMode(PIR_PIN, INPUT);
+    attachInterrupt(digitalPinToInterrupt(PIR_PIN), motionISR, RISING);
+    Serial.printf("[SETUP] PIR sensor initialized on GPIO%d (motion detection %s)\n", 
+                  PIR_PIN, motionEnabled ? "enabled" : "disabled");
 
     // Disable WiFi power saving for consistent streaming performance
     WiFi.setSleep(false);
@@ -133,6 +175,11 @@ void loop() {
         }
     }
 
+    // Handle motion detection
+    if (motionDetected && motionEnabled) {
+        handleMotionDetection();
+    }
+
     // Periodic image capture
     if (cameraReady && mqttConnected) {
         if (currentMillis - lastCaptureTime >= CAPTURE_INTERVAL) {
@@ -151,23 +198,207 @@ void loop() {
     yield();
 }
 
+void loadDeviceName() {
+    // LittleFS.begin(true) is idempotent - safe to call multiple times, true = format if needed
+    if (!LittleFS.begin(true)) {
+        Serial.println("[FS] Warning: LittleFS mount issue, using default device name");
+        return;
+    }
+
+    if (LittleFS.exists(DEVICE_NAME_FILE)) {
+        File file = LittleFS.open(DEVICE_NAME_FILE, "r");
+        if (file) {
+            String name = file.readStringUntil('\n');
+            name.trim();
+            if (name.length() > 0 && name.length() < sizeof(deviceName)) {
+                strncpy(deviceName, name.c_str(), sizeof(deviceName) - 1);
+                deviceName[sizeof(deviceName) - 1] = '\0';
+                Serial.print("[Config] Loaded device name: ");
+                Serial.println(deviceName);
+            }
+            file.close();
+        }
+    } else {
+        Serial.println("[Config] No saved device name, using default");
+    }
+}
+
+void saveDeviceName(const char* name) {
+    // LittleFS.begin(true) is idempotent - safe to call multiple times, true = format if needed
+    if (!LittleFS.begin(true)) {
+        Serial.println("[FS] Warning: Cannot save device name due to filesystem issue");
+        return;
+    }
+
+    File file = LittleFS.open(DEVICE_NAME_FILE, "w");
+    if (file) {
+        file.println(name);
+        file.close();
+        Serial.print("[FS] Saved device name: ");
+        Serial.println(name);
+    } else {
+        Serial.println("[FS] Failed to save device name");
+    }
+}
+
+void loadMotionConfig() {
+    if (!LittleFS.begin(true)) {
+        Serial.println("[FS] Warning: LittleFS mount issue, using default motion config");
+        return;
+    }
+
+    if (LittleFS.exists(MOTION_CONFIG_FILE)) {
+        File file = LittleFS.open(MOTION_CONFIG_FILE, "r");
+        if (file) {
+            String config = file.readStringUntil('\n');
+            config.trim();
+            motionEnabled = (config == "1" || config.equalsIgnoreCase("true"));
+            Serial.printf("[Config] Loaded motion config: %s\n", motionEnabled ? "enabled" : "disabled");
+            file.close();
+        }
+    } else {
+        Serial.println("[Config] No saved motion config, using default (enabled)");
+    }
+}
+
+void saveMotionConfig(bool enabled) {
+    if (!LittleFS.begin(true)) {
+        Serial.println("[FS] Warning: Cannot save motion config due to filesystem issue");
+        return;
+    }
+
+    File file = LittleFS.open(MOTION_CONFIG_FILE, "w");
+    if (file) {
+        file.println(enabled ? "1" : "0");
+        file.close();
+        Serial.printf("[FS] Saved motion config: %s\n", enabled ? "enabled" : "disabled");
+    } else {
+        Serial.println("[FS] Failed to save motion config");
+    }
+}
+
+void IRAM_ATTR motionISR() {
+    motionDetected = true;
+}
+
+void handleMotionDetection() {
+    unsigned long currentMillis = millis();
+    
+    // Clear flag
+    motionDetected = false;
+    
+    // Debounce check
+    if (currentMillis - lastMotionTime < PIR_DEBOUNCE_MS) {
+        return;
+    }
+    
+    lastMotionTime = currentMillis;
+    motionDetectCount++;
+    
+    Serial.printf("[MOTION] Detected! Count: %lu\n", motionDetectCount);
+    
+    // Log to InfluxDB
+    logEventToInflux("pir_motion", "info");
+    
+    // Trigger capture if camera is ready
+    if (cameraReady) {
+        captureAndPublish();
+    }
+}
+
 void setupWiFi() {
     Serial.println("Setting up WiFi...");
 
+    // Initialize Double Reset Detector
+    drd = new DoubleResetDetector(DRD_TIMEOUT, DRD_ADDRESS);
+
     // Set WiFi mode
     WiFi.mode(WIFI_STA);
+
+    // Create custom AP name based on device name
+    String apName = String(deviceName);
+    apName.replace(" ", "-");
+    apName = "Cam-" + apName + "-Setup";
+
+    // Add custom parameter for device name
+    WiFiManagerParameter customDeviceName("device_name", "Device Name", deviceName, sizeof(deviceName));
+    wifiManager.addParameter(&customDeviceName);
+
+    // Track if we need to save config
+    bool shouldSaveConfig = false;
+    String oldDeviceName = String(deviceName);
+
+    // Set save config callback
+    wifiManager.setSaveConfigCallback([&shouldSaveConfig]() {
+        shouldSaveConfig = true;
+    });
 
     // WiFiManager configuration
     wifiManager.setConfigPortalTimeout(180);
     wifiManager.setConnectTimeout(WIFI_CONNECT_TIMEOUT / 1000);
 
-    // Try to connect
-    if (!wifiManager.autoConnect(DEVICE_NAME)) {
-        Serial.println("Failed to connect to WiFi");
-        ESP.restart();
+    // Check for double reset - enter config portal if detected
+    if (drd->detectDoubleReset()) {
+        Serial.println();
+        Serial.println("========================================");
+        Serial.println("  DOUBLE RESET DETECTED");
+        Serial.println("  Starting WiFi Configuration Portal");
+        Serial.println("========================================");
+        Serial.println();
+        Serial.print("[WiFi] Connect to AP: ");
+        Serial.println(apName);
+        Serial.println("[WiFi] Then open http://192.168.4.1 in browser");
+        Serial.println();
+
+        // Start config portal (blocking)
+        if (!wifiManager.startConfigPortal(apName.c_str())) {
+            Serial.println("[WiFi] Failed to connect after config portal");
+            Serial.println("[WiFi] Restarting...");
+            delay(3000);
+            ESP.restart();
+        }
+
+        // Save device name if config was saved
+        if (shouldSaveConfig) {
+            String newName = customDeviceName.getValue();
+            if (newName.length() > 0 && newName != oldDeviceName) {
+                strncpy(deviceName, newName.c_str(), sizeof(deviceName) - 1);
+                deviceName[sizeof(deviceName) - 1] = '\0';
+                saveDeviceName(deviceName);
+                Serial.print("[Config] Device name updated to: ");
+                Serial.println(deviceName);
+            }
+        }
+    } else {
+        // Normal boot - try to auto-connect
+        Serial.println("[WiFi] Normal boot - attempting connection...");
+        Serial.println("[WiFi] (Double-reset within 3 seconds to enter config mode)");
+
+        // Try to connect
+        if (!wifiManager.autoConnect(apName.c_str())) {
+            Serial.println("Failed to connect to WiFi");
+            ESP.restart();
+        }
+
+        // Save device name if config was updated during autoConnect
+        if (shouldSaveConfig) {
+            String newName = customDeviceName.getValue();
+            if (newName.length() > 0 && newName != oldDeviceName) {
+                strncpy(deviceName, newName.c_str(), sizeof(deviceName) - 1);
+                deviceName[sizeof(deviceName) - 1] = '\0';
+                saveDeviceName(deviceName);
+                Serial.print("[Config] Device name updated to: ");
+                Serial.println(deviceName);
+            }
+        }
     }
 
+    // Clear DRD flag
+    drd->stop();
+
     Serial.println("WiFi connected!");
+    Serial.print("Device name: ");
+    Serial.println(deviceName);
     Serial.print("IP address: ");
     Serial.println(WiFi.localIP());
     Serial.print("Signal strength: ");
@@ -214,7 +445,7 @@ void setupWebServer() {
     // Status endpoint
     server.on("/status", HTTP_GET, [](AsyncWebServerRequest *request) {
         JsonDocument doc;
-        doc["device"] = DEVICE_NAME;
+        doc["device"] = deviceName;
         doc["version"] = FIRMWARE_VERSION;
         doc["uptime"] = millis() / 1000;
         doc["wifi_rssi"] = WiFi.RSSI();
@@ -227,6 +458,9 @@ void setupWebServer() {
         serializeJson(doc, output);
         request->send(200, "application/json", output);
     });
+
+    // Motion control endpoint
+    server.on("/motion-control", HTTP_GET, handleMotionControl);
 
     // OTA update endpoint (manual - upload firmware.bin)
     server.on("/update", HTTP_GET, [](AsyncWebServerRequest *request){
@@ -287,7 +521,7 @@ void reconnectMQTT() {
 
     Serial.print("Attempting MQTT connection...");
 
-    String clientId = String(DEVICE_NAME) + "-" + String(WiFi.macAddress());
+    String clientId = String(deviceName) + "-" + String(WiFi.macAddress());
 
     if (mqttClient.connect(clientId.c_str(), MQTT_USER, MQTT_PASSWORD)) {
         Serial.println("connected!");
@@ -315,13 +549,15 @@ void publishStatus() {
     unsigned long seconds = uptimeSeconds % 60;
 
     JsonDocument doc;
-    doc["device"] = DEVICE_NAME;
+    doc["device"] = deviceName;
     doc["version"] = FIRMWARE_VERSION;
     doc["ip"] = WiFi.localIP().toString();
     doc["rssi"] = WiFi.RSSI();
     doc["uptime_seconds"] = uptimeSeconds;
     doc["uptime"] = String(days) + "d " + String(hours) + "h " + String(minutes) + "m " + String(seconds) + "s";
     doc["camera_ready"] = cameraReady;
+    doc["motion_enabled"] = motionEnabled;
+    doc["motion_count"] = motionDetectCount;
     doc["free_heap"] = ESP.getFreeHeap();
     doc["free_psram"] = ESP.getFreePsram();
     doc["capture_count"] = captureCount;
@@ -501,6 +737,13 @@ select{border:1px solid var(--border);font-size:14px;height:22px;outline:0;borde
 <div class="hidden" id="sidebar">
 <input type="checkbox" id="nav-toggle-cb" checked="checked">
 <nav id="menu">
+<div class="input-group" id="motion-group">
+<label for="motion_enabled">Motion Detection</label>
+<div class="switch">
+<input id="motion_enabled" type="checkbox" checked="checked">
+<label class="slider" for="motion_enabled"></label>
+</div>
+</div>
 <div class="input-group" id="framesize-group">
 <label for="framesize">Resolution</label>
 <select id="framesize" class="default-action">
@@ -762,6 +1005,9 @@ return response.json();
 document.querySelectorAll('.default-action').forEach(el=>{
 updateValue(el,state[el.id],false);
 });
+if(state.motion_enabled!==undefined){
+document.getElementById('motion_enabled').checked=state.motion_enabled;
+}
 show(settings);
 });
 const stopStream=()=>{
@@ -818,6 +1064,15 @@ const wb=document.getElementById('wb_mode-group');
 awb.onchange=()=>{
 updateConfig(awb);
 awb.checked?show(wb):hide(wb);
+};
+
+// Motion detection toggle
+const motionToggle=document.getElementById('motion_enabled');
+motionToggle.onchange=()=>{
+const enabled=motionToggle.checked?1:0;
+fetch(`${baseHost}/motion-control?enabled=${enabled}`).then(response=>response.json()).then(data=>{
+console.log('Motion detection:',data.motion_enabled?'enabled':'disabled');
+}).catch(err=>console.error('Motion control failed:',err));
 };
 
 // Preset helpers
@@ -1047,10 +1302,10 @@ void setupInfluxDB() {
     Serial.println("Setting up InfluxDB...");
 
     // Add tags to data points
-    sensorData.addTag("device", DEVICE_NAME);
+    sensorData.addTag("device", deviceName);
     sensorData.addTag("location", "surveillance");
 
-    eventData.addTag("device", DEVICE_NAME);
+    eventData.addTag("device", deviceName);
     eventData.addTag("location", "surveillance");
 
     // Note: Skip validateConnection() as it's blocking and can delay startup
@@ -1105,4 +1360,28 @@ void logEventToInflux(const char* event, const char* severity) {
 
     // Write to InfluxDB (silently fail to avoid blocking/spam)
     influxClient.writePoint(eventData);
+}
+
+void handleMotionControl(AsyncWebServerRequest *request) {
+    if (!request->hasParam("enabled")) {
+        request->send(400, "text/plain", "Missing 'enabled' parameter");
+        return;
+    }
+
+    String enabledParam = request->getParam("enabled")->value();
+    bool newState = (enabledParam == "1" || enabledParam.equalsIgnoreCase("true"));
+    
+    motionEnabled = newState;
+    saveMotionConfig(newState);
+    
+    Serial.printf("[Motion] Detection %s via web control\n", newState ? "enabled" : "disabled");
+    
+    JsonDocument doc;
+    doc["motion_enabled"] = motionEnabled;
+    doc["motion_count"] = motionDetectCount;
+    doc["status"] = "ok";
+    
+    String output;
+    serializeJson(doc, output);
+    request->send(200, "application/json", output);
 }

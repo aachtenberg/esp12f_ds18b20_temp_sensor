@@ -29,6 +29,15 @@
 // Status LED (if available)
 #define STATUS_LED_PIN 2
 
+// PIR Motion Sensor (AM312)
+#if defined(CAMERA_MODEL_ESP32S3_EYE)
+  #define PIR_PIN 14  // GPIO14 for ESP32-S3
+#else
+  #define PIR_PIN 13  // GPIO13 for AI-Thinker ESP32-CAM
+#endif
+
+#define PIR_DEBOUNCE_MS 5000  // 5 seconds between motion triggers
+
 // Double reset detector
 #define DRD_TIMEOUT 10
 #define DRD_ADDRESS 0x00
