@@ -880,7 +880,6 @@ select{border:1px solid var(--border);font-size:14px;height:22px;outline:0;borde
 <span id="mqtt-status">MQTT: --</span>
 </div>
 </div>
-<button id="close-panel" class="small" style="padding:0 6px;line-height:20px;margin:0">✕</button>
 </div>
 <div class="panel-content">
 <nav id="menu">
@@ -1064,7 +1063,6 @@ const stillButton=document.getElementById('get-still');
 const streamButton=document.getElementById('toggle-stream');
 const rightPanel=document.getElementById('right-panel');
 const rightToggle=document.getElementById('right-toggle');
-const closePanel=document.getElementById('close-panel');
 let isStreaming=false;
 const hide=el=>el.classList.add('hidden');
 const show=el=>el.classList.remove('hidden');
@@ -1127,13 +1125,6 @@ const setConnectivity=(rssi,mqtt)=>{
 rightToggle.onclick=()=>{
  if(window.innerWidth<=768){
  rightPanel.classList.toggle('mobile-visible');
- } else {
- rightPanel.classList.toggle('collapsed');
- }
-};
-closePanel.onclick=()=>{
- if(window.innerWidth<=768){
- rightPanel.classList.remove('mobile-visible');
  } else {
  rightPanel.classList.toggle('collapsed');
  }
