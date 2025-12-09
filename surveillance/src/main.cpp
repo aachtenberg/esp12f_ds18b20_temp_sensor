@@ -817,9 +817,9 @@ select{border:1px solid var(--border);font-size:14px;height:22px;outline:0;borde
 </div>
 </div>
 <div class="button-group">
-<button id="preset-smooth" class="preset small">Smooth</button>
-<button id="preset-balanced" class="preset small">Balanced</button>
-<button id="preset-detail" class="preset small">Detail</button>
+<button id="preset-smooth" class="preset small">Fast</button>
+<button id="preset-balanced" class="preset small">Default</button>
+<button id="preset-detail" class="preset small">High-Quality</button>
 </div>
 </div>
 <button id="right-toggle">⚙</button>
@@ -1140,6 +1140,7 @@ const el=document.getElementById(id);
 if(!el) return;
 updateValue(el,val,true);
 };
+// Fast: Low res, high compression, minimal latency
 document.getElementById('preset-smooth').onclick=()=>{
 setAndPush('framesize','5');
 setAndPush('quality','12');
@@ -1147,6 +1148,7 @@ setAndPush('aec','1');
 setAndPush('aec_value','200');
 setAndPush('gainceiling','1');
 };
+// Default: Balanced quality and speed (recommended)
 document.getElementById('preset-balanced').onclick=()=>{
 setAndPush('framesize','8');
 setAndPush('quality','8');
@@ -1154,6 +1156,7 @@ setAndPush('aec','1');
 setAndPush('aec_value','300');
 setAndPush('gainceiling','2');
 };
+// High-Quality: Maximum image detail, slower
 document.getElementById('preset-detail').onclick=()=>{
 setAndPush('framesize','9');
 setAndPush('quality','5');
