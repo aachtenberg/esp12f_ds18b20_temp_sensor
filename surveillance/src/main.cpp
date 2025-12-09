@@ -482,6 +482,9 @@ void setupWebServer() {
     server.on("/status", HTTP_GET, [](AsyncWebServerRequest *request) {
         JsonDocument doc;
         doc["device"] = deviceName;
+        doc["device_name"] = deviceName;
+        doc["chip_id"] = deviceChipId;
+        doc["mac_address"] = deviceMac;
         doc["version"] = FIRMWARE_VERSION;
         doc["uptime"] = millis() / 1000;
         doc["wifi_rssi"] = WiFi.RSSI();
@@ -830,40 +833,15 @@ select{border:1px solid var(--border);font-size:14px;height:22px;outline:0;borde
 </div>
 <div id="right-panel">
 <div class="panel-header">
-<span>Advanced Settings</span>
+<div style="display:flex;flex-direction:column;gap:4px;flex:1">
+<span style="font-weight:600">Camera: <span id="device-name">Loading...</span></span>
+<span style="font-size:12px;color:var(--muted)">ID: <span id="device-id">--</span></span>
+</div>
 <button id="close-panel" class="small" style="padding:0 6px;line-height:20px;margin:0">✕</button>
 </div>
 <div class="panel-content">
 <nav id="menu">
-<div class="input-group" id="motion-group">
-<label for="motion_enabled">Motion Detection</label>
-<div class="switch">
-<input id="motion_enabled" type="checkbox" checked="checked">
-<label class="slider" for="motion_enabled"></label>
-</div>
-</div>
-<div class="input-group" id="framesize-group">
-<label for="framesize">Resolution</label>
-<select id="framesize" class="default-action">
-<option value="13">UXGA(1600x1200)</option>
-<option value="12">SXGA(1280x1024)</option>
-<option value="11">HD(1280x720)</option>
-<option value="10">XGA(1024x768)</option>
-<option value="9">SVGA(800x600)</option>
-<option value="8" selected="selected">VGA(640x480)</option>
-<option value="7">HVGA(480x320)</option>
-<option value="6">CIF(400x296)</option>
-<option value="5">QVGA(320x240)</option>
-<option value="3">HQVGA(240x176)</option>
-<option value="1">QQVGA(160x120)</option>
-</select>
-</div>
-<div class="input-group" id="quality-group">
-<label for="quality">Quality</label>
-<div class="range-min">High</div>
-<input type="range" id="quality" min="10" max="63" value="10" class="default-action">
-<div class="range-max">Low</div>
-</div>
+<div class="section-title">Image Settings</div>
 <div class="input-group" id="brightness-group">
 <label for="brightness">Brightness</label>
 <div style="display:flex;gap:4px;align-items:center;flex:1">
@@ -1078,13 +1056,21 @@ console.log(`Control updated: ${el.id}=${value}`);
 // Mobile panel toggle
 rightToggle.onclick=()=>rightPanel.classList.toggle('mobile-visible');
 closePanel.onclick=()=>rightPanel.classList.remove('mobile-visible');
-// Load initial settings
+// Load initial settings and device info
 fetch(`${baseHost}/status`).then(response=>response.json()).then(state=>{
 document.querySelectorAll('.default-action').forEach(el=>{
 updateValue(el,state[el.id],false);
 });
 if(state.motion_enabled!==undefined){
 document.getElementById('motion_enabled').checked=state.motion_enabled;
+}
+// Display device name and chip ID
+if(state.device_name){
+document.getElementById('device-name').textContent=state.device_name;
+}
+if(state.chip_id){
+const shortId=state.chip_id.substring(0,8).toUpperCase();
+document.getElementById('device-id').textContent=shortId;
 }
 });
 // Stream controls
