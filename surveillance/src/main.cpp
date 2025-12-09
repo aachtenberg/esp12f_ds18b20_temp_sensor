@@ -750,7 +750,9 @@ a{color:var(--text)}
 .input-group input,.input-group select{flex:1;min-width:0}
 .range-max,.range-min{display:inline-block;padding:0 5px;color:var(--muted);font-size:12px}
 .control-row{display:flex;gap:6px;align-items:center}
+.control-row.tight{gap:4px}
 .control-row label{min-width:60px;white-space:nowrap}
+.control-row.tight label{min-width:auto}
 .control-row select,.control-row input[type=range]{flex:1}
 button{display:inline-block;margin:3px;padding:0 10px;border:0;line-height:28px;cursor:pointer;color:#001318;background:var(--accent);border-radius:8px;font-size:14px;outline:0;box-shadow:0 0 0 1px var(--accent-contrast) inset;white-space:nowrap}
 button:hover{filter:brightness(1.08)}
@@ -812,8 +814,8 @@ select{border:1px solid var(--border);font-size:14px;height:22px;outline:0;borde
 <label for="quality">Quality:</label>
 <input type="range" id="quality" min="10" max="63" value="8" class="default-action" style="width:100px">
 </div>
-<div class="control-row">
-<label for="motion_enabled" style="min-width:70px">Motion:</label>
+<div class="control-row tight">
+<label for="motion_enabled">Motion:</label>
 <div class="switch">
 <input id="motion_enabled" type="checkbox" checked="checked">
 <label class="slider" for="motion_enabled"></label>
