@@ -808,7 +808,9 @@ select{border:1px solid var(--border);font-size:14px;height:22px;outline:0;borde
 .close{position:absolute;right:5px;top:5px;background:var(--danger);width:30px;height:30px;border-radius:100%;color:#fff;text-align:center;line-height:30px;cursor:pointer;box-shadow:0 0 0 1px #7a1e1e inset}
 .hidden{display:none}
 .section-title{font-size:12px;font-weight:600;color:var(--muted);margin-top:12px;margin-bottom:6px;text-transform:uppercase;letter-spacing:.5px}
+#device-name-bar{display:none}
 @media (max-width:1200px){
+#device-name-bar{display:inline-block}
 #right-panel{width:250px}
 .input-group>label{min-width:90px}
 }
@@ -827,6 +829,7 @@ select{border:1px solid var(--border);font-size:14px;height:22px;outline:0;borde
 <button id="get-still">Capture</button>
 <button id="toggle-stream">Start Stream</button>
 <span id="status-pill" class="status-pill status-warn"><span class="dot"></span><span id="status-text">Initializing...</span></span>
+<span id="device-name-bar" style="font-size:14px;font-weight:600;color:var(--text);white-space:nowrap">Loading...</span>
 <div id="controls-group">
 <div class="control-row">
 <label for="framesize">Resolution:</label>
@@ -1146,6 +1149,8 @@ document.getElementById('motion_enabled').checked=state.motion_enabled;
 // Display device name and chip ID
 if(state.device_name){
 document.getElementById('device-name').textContent=state.device_name;
+const topBarName=document.getElementById('device-name-bar');
+if(topBarName) topBarName.textContent=state.device_name;
 }
 if(state.chip_id){
 const shortId=state.chip_id.substring(0,8).toUpperCase();
