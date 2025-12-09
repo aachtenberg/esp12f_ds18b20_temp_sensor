@@ -39,17 +39,17 @@ camera_config_t getCameraConfig() {
             Serial.println("PSRAM not found (S3) - using reduced settings");
         }
     #else
-        // AI-Thinker ESP32-CAM: favor faster frame time and lower bandwidth
+        // AI-Thinker ESP32-CAM: optimize for quality + speed
         if (psramFound()) {
-            config.frame_size = FRAMESIZE_VGA;  // 640x480 for quicker captures/stream
-            config.jpeg_quality = 12;
+            config.frame_size = FRAMESIZE_VGA;  // 640x480 - decent resolution
+            config.jpeg_quality = 8;            // Higher quality (lower value = better quality)
             config.fb_count = 2;                // double buffering for smoother stream
-            Serial.println("PSRAM found (ESP32-CAM) - using VGA speed profile");
+            Serial.println("PSRAM found (ESP32-CAM) - using VGA quality + speed profile");
         } else {
-            config.frame_size = FRAMESIZE_QVGA; // 320x240 when PSRAM missing
-            config.jpeg_quality = 14;
+            config.frame_size = FRAMESIZE_HVGA; // 480x320 when PSRAM missing (better than QVGA)
+            config.jpeg_quality = 10;
             config.fb_count = 1;
-            Serial.println("PSRAM not found (ESP32-CAM) - using QVGA fallback");
+            Serial.println("PSRAM not found (ESP32-CAM) - using HVGA quality fallback");
         }
     #endif
 
@@ -83,25 +83,25 @@ bool initCamera() {
             // Standard OV2640 settings (most common for ESP32-S3)
         }
 
-        // Initial sensor adjustments (optimized for SVGA speed)
-        s->set_brightness(s, 0);     // -2 to 2
-        s->set_contrast(s, 0);       // -2 to 2
-        s->set_saturation(s, 0);     // -2 to 2
+        // Sensor adjustments optimized for quality + speed
+        s->set_brightness(s, 0);     // -2 to 2 (neutral)
+        s->set_contrast(s, 1);       // -2 to 2 (slight boost for clarity)
+        s->set_saturation(s, 0);     // -2 to 2 (natural colors)
         s->set_special_effect(s, 0); // 0 to 6 (0 - No Effect)
         s->set_whitebal(s, 1);       // 0 = disable , 1 = enable
         s->set_awb_gain(s, 1);       // 0 = disable , 1 = enable
         s->set_wb_mode(s, 0);        // 0 to 4 - if awb_gain enabled
-        s->set_exposure_ctrl(s, 1);  // 0 = disable , 1 = enable
+        s->set_exposure_ctrl(s, 1);  // 0 = disable , 1 = enable (auto exposure)
         s->set_aec2(s, 0);           // 0 = disable , 1 = enable
         s->set_ae_level(s, 0);       // -2 to 2
-        s->set_aec_value(s, 250);    // Lower = faster (0 to 1200)
+        s->set_aec_value(s, 300);    // Balanced exposure time (0 to 1200)
         s->set_gain_ctrl(s, 1);      // 0 = disable , 1 = enable
         s->set_agc_gain(s, 0);       // 0 to 30
-        s->set_gainceiling(s, (gainceiling_t)2);  // Allow more gain for speed
-        s->set_bpc(s, 0);            // 0 = disable , 1 = enable (disabled for speed)
+        s->set_gainceiling(s, (gainceiling_t)3);  // Moderate gain for better detail
+        s->set_bpc(s, 1);            // 0 = disable , 1 = enable (enabled for quality)
         s->set_wpc(s, 1);            // 0 = disable , 1 = enable
         s->set_raw_gma(s, 1);        // 0 = disable , 1 = enable
-        s->set_lenc(s, 0);           // 0 = disable , 1 = enable (disabled for speed)
+        s->set_lenc(s, 1);           // 0 = disable , 1 = enable (enabled for quality)
         s->set_hmirror(s, 0);        // 0 = disable , 1 = enable
         s->set_vflip(s, 0);          // 0 = disable , 1 = enable
         s->set_dcw(s, 1);            // 0 = disable , 1 = enable

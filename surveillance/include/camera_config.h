@@ -60,8 +60,8 @@
 #define LED_GPIO_NUM      4
 #endif
 
-// Camera settings - optimized for performance
-#define CAMERA_XCLK_FREQ  20000000  // 20MHz is stable for most cameras
+// Camera settings - optimized for quality + speed
+#define CAMERA_XCLK_FREQ  25000000  // 25MHz for faster frame capture
 #define CAMERA_FB_COUNT   2         // Double buffering for smooth streaming
 
 // Initialize camera with default settings
