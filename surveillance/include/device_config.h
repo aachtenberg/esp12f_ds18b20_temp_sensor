@@ -44,7 +44,7 @@
 #define PIR_DEBOUNCE_MS 5000  // 5 seconds between motion triggers
 
 // Double reset detector
-#define DRD_TIMEOUT 10
+#define DRD_TIMEOUT 3
 #define DRD_ADDRESS 0x00
 
 #endif // DEVICE_CONFIG_H
