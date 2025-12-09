@@ -2,7 +2,7 @@
 #define DEVICE_CONFIG_H
 
 // Device identification
-#define DEVICE_NAME "ESP32-S3-Surveillance"
+#define DEVICE_NAME "ESP32-CAM-Surveillance"
 #define FIRMWARE_VERSION "1.0.0"
 
 // WiFi settings
@@ -13,11 +13,14 @@
 #define MQTT_PORT 1883
 #define MQTT_RECONNECT_INTERVAL 5000  // 5 seconds
 
-// MQTT Topics
-#define MQTT_TOPIC_STATUS "surveillance/status"
-#define MQTT_TOPIC_IMAGE "surveillance/image"
-#define MQTT_TOPIC_MOTION "surveillance/motion"
-#define MQTT_TOPIC_COMMAND "surveillance/command"
+// MQTT Topics (base paths - device-specific topics built dynamically)
+#define MQTT_TOPIC_BASE "surveillance"
+#define MQTT_TOPIC_STATUS_SUFFIX "/status"
+#define MQTT_TOPIC_IMAGE_SUFFIX "/image"
+#define MQTT_TOPIC_MOTION_SUFFIX "/motion"
+#define MQTT_TOPIC_COMMAND_SUFFIX "/command"
+#define MQTT_TOPIC_METRICS_SUFFIX "/metrics"
+#define MQTT_TOPIC_EVENTS_SUFFIX "/events"
 
 // Image capture settings
 #define CAPTURE_INTERVAL 60000  // Capture every 60 seconds (configurable)

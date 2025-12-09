@@ -5,8 +5,6 @@
 #include <ArduinoJson.h>
 #include <ESPAsyncWebServer.h>
 #include <Update.h>
-#include <InfluxDbClient.h>
-#include <InfluxDbCloud.h>
 #include <base64.h>
 #include <ESP_DoubleResetDetector.h>
 #include <LittleFS.h>
@@ -25,6 +23,10 @@ DoubleResetDetector* drd;
 char deviceName[40] = "Surveillance Cam";
 const char* DEVICE_NAME_FILE = "/device_name.txt";
 
+// Device hardware identifiers
+char deviceChipId[17];  // 16 hex chars + null terminator
+char deviceMac[18];     // XX:XX:XX:XX:XX:XX format
+
 // Motion detection config
 const char* MOTION_CONFIG_FILE = "/motion_config.txt";
 bool motionEnabled = true;  // Default enabled
@@ -37,17 +39,12 @@ WiFiClient espClient;
 PubSubClient mqttClient(espClient);
 AsyncWebServer server(WEB_SERVER_PORT);
 WiFiManager wifiManager;
-InfluxDBClient influxClient(INFLUXDB_URL, INFLUXDB_ORG, INFLUXDB_BUCKET, INFLUXDB_TOKEN);
-
-// Data points
-Point sensorData("camera_metrics");
-Point eventData("camera_events");
 
 // Timing variables
 unsigned long lastCaptureTime = 0;
 unsigned long lastMqttReconnect = 0;
 unsigned long lastWiFiCheck = 0;
-unsigned long lastInfluxWrite = 0;
+unsigned long lastMetricsPublish = 0;
 unsigned long lastMqttStatus = 0;
 
 // Device state
@@ -64,18 +61,27 @@ void loadDeviceName();
 void saveDeviceName(const char* name);
 void loadMotionConfig();
 void saveMotionConfig(bool enabled);
+void getDeviceChipId();
+void getDeviceMacAddress();
 void IRAM_ATTR motionISR();
 void setupWiFi();
 void setupCamera();
 void setupMQTT();
 void setupWebServer();
-void setupInfluxDB();
 void reconnectMQTT();
 void publishStatus();
 void captureAndPublish();
 void captureAndPublishWithImage();
-void publishMetricsToInflux();
-void logEventToInflux(const char* event, const char* severity);
+void publishMetricsToMQTT();
+void logEventToMQTT(const char* event, const char* severity);
+
+// Dynamic topic builders (device-specific for multiple camera support)
+String getTopicStatus() { return String(MQTT_TOPIC_BASE) + "/" + deviceName + MQTT_TOPIC_STATUS_SUFFIX; }
+String getTopicImage() { return String(MQTT_TOPIC_BASE) + "/" + deviceName + MQTT_TOPIC_IMAGE_SUFFIX; }
+String getTopicMotion() { return String(MQTT_TOPIC_BASE) + "/" + deviceName + MQTT_TOPIC_MOTION_SUFFIX; }
+String getTopicCommand() { return String(MQTT_TOPIC_BASE) + "/" + deviceName + MQTT_TOPIC_COMMAND_SUFFIX; }
+String getTopicMetrics() { return String(MQTT_TOPIC_BASE) + "/" + deviceName + MQTT_TOPIC_METRICS_SUFFIX; }
+String getTopicEvents() { return String(MQTT_TOPIC_BASE) + "/" + deviceName + MQTT_TOPIC_EVENTS_SUFFIX; }
 void mqttCallback(char* topic, byte* payload, unsigned int length);
 void handleRoot(AsyncWebServerRequest *request);
 void handleCapture(AsyncWebServerRequest *request);
@@ -97,6 +103,11 @@ void setup() {
     // Load device name from filesystem
     Serial.println("[SETUP] Loading device name...");
     loadDeviceName();
+
+    // Get device chip ID and MAC address
+    Serial.println("[SETUP] Getting device identifiers...");
+    getDeviceChipId();
+    getDeviceMacAddress();
 
     // Load motion config
     Serial.println("[SETUP] Loading motion config...");
@@ -120,9 +131,6 @@ void setup() {
     // Setup WiFi
     setupWiFi();
 
-    // Setup InfluxDB
-    setupInfluxDB();
-
     // Setup Camera
     setupCamera();
 
@@ -137,7 +145,7 @@ void setup() {
     Serial.printf("PSRAM free: %d bytes\n", ESP.getFreePsram());
 
     // Log boot event
-    logEventToInflux("device_boot", "info");
+    logEventToMQTT("device_boot", "info");
 
     #ifdef STATUS_LED_PIN
     digitalWrite(STATUS_LED_PIN, HIGH);
@@ -188,10 +196,10 @@ void loop() {
         }
     }
 
-    // Publish metrics to InfluxDB every 60 seconds (reduced frequency to avoid blocking)
-    if (currentMillis - lastInfluxWrite >= 60000) {
-        publishMetricsToInflux();
-        lastInfluxWrite = currentMillis;
+    // Publish metrics to MQTT every 60 seconds
+    if (currentMillis - lastMetricsPublish >= 60000) {
+        publishMetricsToMQTT();
+        lastMetricsPublish = currentMillis;
     }
 
     // Minimal delay - yield to system tasks
@@ -239,6 +247,22 @@ void saveDeviceName(const char* name) {
     } else {
         Serial.println("[FS] Failed to save device name");
     }
+}
+
+void getDeviceChipId() {
+    uint64_t chipId = ESP.getEfuseMac();
+    sprintf(deviceChipId, "%012llX", chipId);
+    Serial.print("[Config] Device Chip ID: ");
+    Serial.println(deviceChipId);
+}
+
+void getDeviceMacAddress() {
+    uint8_t mac[6];
+    WiFi.macAddress(mac);
+    sprintf(deviceMac, "%02X:%02X:%02X:%02X:%02X:%02X", 
+            mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+    Serial.print("[Config] Device MAC: ");
+    Serial.println(deviceMac);
 }
 
 void loadMotionConfig() {
@@ -297,8 +321,20 @@ void handleMotionDetection() {
     
     Serial.printf("[MOTION] Detected! Count: %lu\n", motionDetectCount);
     
-    // Log to InfluxDB
-    logEventToInflux("pir_motion", "info");
+    // Publish motion event to dedicated topic
+    JsonDocument motionDoc;
+    motionDoc["device"] = deviceName;
+    motionDoc["chip_id"] = deviceChipId;
+    motionDoc["timestamp"] = millis() / 1000;
+    motionDoc["motion_count"] = motionDetectCount;
+    motionDoc["event"] = "motion_detected";
+    
+    String motionOutput;
+    serializeJson(motionDoc, motionOutput);
+    mqttClient.publish(getTopicMotion().c_str(), motionOutput.c_str(), false);
+    
+    // Log to MQTT events topic
+    logEventToMQTT("pir_motion", "info");
     
     // Trigger capture if camera is ready
     if (cameraReady) {
@@ -528,7 +564,7 @@ void reconnectMQTT() {
         mqttConnected = true;
 
         // Subscribe to command topic
-        mqttClient.subscribe(MQTT_TOPIC_COMMAND);
+        mqttClient.subscribe(getTopicCommand().c_str());
 
         // Publish status
         publishStatus();
@@ -550,6 +586,7 @@ void publishStatus() {
 
     JsonDocument doc;
     doc["device"] = deviceName;
+    doc["chip_id"] = deviceChipId;
     doc["version"] = FIRMWARE_VERSION;
     doc["ip"] = WiFi.localIP().toString();
     doc["rssi"] = WiFi.RSSI();
@@ -566,7 +603,7 @@ void publishStatus() {
     String output;
     serializeJson(doc, output);
 
-    mqttClient.publish(MQTT_TOPIC_STATUS, output.c_str(), true);
+    mqttClient.publish(getTopicStatus().c_str(), output.c_str(), true);
     Serial.println("Status published to MQTT");
 }
 
@@ -577,7 +614,7 @@ void captureAndPublish() {
     if (!fb) {
         Serial.println("Capture failed");
         cameraErrors++;
-        logEventToInflux("capture_failed", "error");
+        logEventToMQTT("capture_failed", "error");
         return;
     }
 
@@ -597,7 +634,7 @@ void captureAndPublish() {
     String output;
     serializeJson(doc, output);
 
-    if (mqttClient.publish(MQTT_TOPIC_IMAGE, output.c_str())) {
+    if (mqttClient.publish(getTopicImage().c_str(), output.c_str())) {
         mqttPublishCount++;
     }
 
@@ -613,7 +650,7 @@ void captureAndPublishWithImage() {
     if (!fb) {
         Serial.println("Capture failed");
         cameraErrors++;
-        logEventToInflux("capture_failed", "error");
+        logEventToMQTT("capture_failed", "error");
         return;
     }
 
@@ -672,7 +709,7 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
             publishStatus();
         } else if (cmd == "restart" || cmd == "reboot") {
             Serial.println("Restart command received");
-            mqttClient.publish(MQTT_TOPIC_STATUS, "{\"status\":\"rebooting\"}", false);
+            mqttClient.publish(getTopicStatus().c_str(), "{\"status\":\"rebooting\"}", false);
             delay(100);
             ESP.restart();
         } else if (cmd == "capture_with_image") {
@@ -1298,68 +1335,55 @@ void handleControl(AsyncWebServerRequest *request) {
     }
 }
 
-void setupInfluxDB() {
-    Serial.println("Setting up InfluxDB...");
-
-    // Add tags to data points
-    sensorData.addTag("device", deviceName);
-    sensorData.addTag("location", "surveillance");
-
-    eventData.addTag("device", deviceName);
-    eventData.addTag("location", "surveillance");
-
-    // Note: Skip validateConnection() as it's blocking and can delay startup
-    // InfluxDB will be validated on first write attempt
-    Serial.println("InfluxDB configured (will validate on first write)");
-}
-
-void publishMetricsToInflux() {
-    if (WiFi.status() != WL_CONNECTED) {
+void publishMetricsToMQTT() {
+    if (WiFi.status() != WL_CONNECTED || !mqttConnected) {
         return;
     }
 
-    // Clear previous data
-    sensorData.clearFields();
+    JsonDocument doc;
+    doc["device"] = deviceName;
+    doc["chip_id"] = deviceChipId;
+    doc["location"] = "surveillance";
+    doc["timestamp"] = millis() / 1000;
+    doc["uptime"] = millis() / 1000;
+    doc["wifi_rssi"] = WiFi.RSSI();
+    doc["free_heap"] = ESP.getFreeHeap();
+    doc["free_psram"] = ESP.getFreePsram();
+    doc["camera_ready"] = cameraReady ? 1 : 0;
+    doc["mqtt_connected"] = mqttConnected ? 1 : 0;
+    doc["capture_count"] = captureCount;
+    doc["camera_errors"] = cameraErrors;
+    doc["mqtt_publishes"] = mqttPublishCount;
 
-    // Add metrics
-    sensorData.addField("uptime", millis() / 1000);
-    sensorData.addField("wifi_rssi", WiFi.RSSI());
-    sensorData.addField("free_heap", ESP.getFreeHeap());
-    sensorData.addField("free_psram", ESP.getFreePsram());
-    sensorData.addField("camera_ready", cameraReady ? 1 : 0);
-    sensorData.addField("mqtt_connected", mqttConnected ? 1 : 0);
-    sensorData.addField("capture_count", captureCount);
-    sensorData.addField("camera_errors", cameraErrors);
-    sensorData.addField("mqtt_publishes", mqttPublishCount);
+    String output;
+    serializeJson(doc, output);
 
-    // Write to InfluxDB (non-blocking, ignore errors to prevent spam)
-    static unsigned long lastErrorLog = 0;
-    if (!influxClient.writePoint(sensorData)) {
-        // Only log errors every 5 minutes to avoid spam
-        if (millis() - lastErrorLog > 300000) {
-            Serial.print("InfluxDB write failed: ");
-            Serial.println(influxClient.getLastErrorMessage());
-            lastErrorLog = millis();
-        }
+    if (!mqttClient.publish(getTopicMetrics().c_str(), output.c_str(), true)) {
+        Serial.println("Failed to publish metrics to MQTT");
     }
 }
 
-void logEventToInflux(const char* event, const char* severity) {
-    if (WiFi.status() != WL_CONNECTED) {
+void logEventToMQTT(const char* event, const char* severity) {
+    if (WiFi.status() != WL_CONNECTED || !mqttConnected) {
         return;
     }
 
-    // Clear previous data
-    eventData.clearFields();
+    JsonDocument doc;
+    doc["device"] = deviceName;
+    doc["chip_id"] = deviceChipId;
+    doc["location"] = "surveillance";
+    doc["timestamp"] = millis() / 1000;
+    doc["event"] = event;
+    doc["severity"] = severity;
+    doc["uptime"] = millis() / 1000;
+    doc["free_heap"] = ESP.getFreeHeap();
 
-    // Add event data
-    eventData.addField("event", event);
-    eventData.addField("severity", severity);
-    eventData.addField("uptime", millis() / 1000);
-    eventData.addField("free_heap", ESP.getFreeHeap());
+    String output;
+    serializeJson(doc, output);
 
-    // Write to InfluxDB (silently fail to avoid blocking/spam)
-    influxClient.writePoint(eventData);
+    if (!mqttClient.publish(getTopicEvents().c_str(), output.c_str(), false)) {
+        Serial.println("Failed to publish event to MQTT");
+    }
 }
 
 void handleMotionControl(AsyncWebServerRequest *request) {
