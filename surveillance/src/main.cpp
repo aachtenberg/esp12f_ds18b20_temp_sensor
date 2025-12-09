@@ -749,8 +749,8 @@ a{color:var(--text)}
 .input-group>label{display:inline-block;min-width:100px;white-space:nowrap}
 .input-group input,.input-group select{flex:1;min-width:0}
 .range-max,.range-min{display:inline-block;padding:0 5px;color:var(--muted);font-size:12px}
-.control-row{display:flex;gap:8px;align-items:center}
-.control-row label{min-width:80px;white-space:nowrap}
+.control-row{display:flex;gap:6px;align-items:center}
+.control-row label{min-width:60px;white-space:nowrap}
 .control-row select,.control-row input[type=range]{flex:1}
 button{display:inline-block;margin:3px;padding:0 10px;border:0;line-height:28px;cursor:pointer;color:#001318;background:var(--accent);border-radius:8px;font-size:14px;outline:0;box-shadow:0 0 0 1px var(--accent-contrast) inset;white-space:nowrap}
 button:hover{filter:brightness(1.08)}
