@@ -12,11 +12,7 @@
 #include "device_config.h"
 #include "secrets.h"
 
-// Double Reset Detector configuration
-#define DRD_TIMEOUT 3
-#define DRD_ADDRESS 0
-
-// Create Double Reset Detector instance
+// Create Double Reset Detector instance (uses DRD_TIMEOUT, DRD_ADDRESS from device_config.h)
 DoubleResetDetector* drd;
 
 // Device name storage
@@ -154,6 +150,9 @@ void setup() {
 
 void loop() {
     unsigned long currentMillis = millis();
+
+    // DRD loop - CRITICAL: must be called to detect double reset
+    drd->loop();
 
     // Handle WiFi reconnection
     if (WiFi.status() != WL_CONNECTED) {
