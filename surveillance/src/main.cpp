@@ -499,6 +499,21 @@ void setupWebServer() {
             if (s) {
                 doc["framesize"] = s->status.framesize;
                 doc["quality"] = s->status.quality;
+                doc["brightness"] = s->status.brightness;
+                doc["contrast"] = s->status.contrast;
+                doc["saturation"] = s->status.saturation;
+                doc["special_effect"] = s->status.special_effect;
+                doc["hmirror"] = s->status.hmirror;
+                doc["vflip"] = s->status.vflip;
+                doc["awb"] = s->status.awb;
+                doc["aec"] = s->status.aec;
+                doc["aec2"] = s->status.aec2;
+                doc["aec_value"] = s->status.aec_value;
+                doc["agc"] = s->status.agc;
+                doc["agc_gain"] = s->status.agc_gain;
+                doc["gainceiling"] = s->status.gainceiling;
+                doc["awb_gain"] = s->status.awb_gain;
+                doc["wb_mode"] = s->status.wb_mode;
             }
         }
 
