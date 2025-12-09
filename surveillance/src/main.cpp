@@ -810,7 +810,7 @@ select{border:1px solid var(--border);font-size:14px;height:22px;outline:0;borde
 <input type="range" id="quality" min="10" max="63" value="8" class="default-action" style="width:100px">
 </div>
 <div class="control-row">
-<label for="motion_enabled">Motion:</label>
+<label for="motion_enabled" style="min-width:70px">Motion:</label>
 <div class="switch">
 <input id="motion_enabled" type="checkbox" checked="checked">
 <label class="slider" for="motion_enabled"></label>
