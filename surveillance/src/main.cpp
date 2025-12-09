@@ -770,6 +770,14 @@ button.disabled{cursor:default;opacity:.6}
 button.small{padding:0 8px;line-height:24px;font-size:12px}
 button.preset{flex:1;min-width:80px}
 .button-group{display:flex;gap:6px;flex-wrap:wrap}
+.status-pill{display:inline-flex;align-items:center;gap:6px;padding:0 10px;height:28px;border-radius:999px;font-size:12px;font-weight:600;line-height:1;background:var(--panel-alt);color:var(--muted);border:1px solid var(--border)}
+.status-pill .dot{width:10px;height:10px;border-radius:50%;background:var(--border);display:inline-block}
+.status-ok{color:#0ecb81;border-color:#0ecb81;background:rgba(14,203,129,0.08)}
+.status-ok .dot{background:#0ecb81}
+.status-warn{color:#f5a524;border-color:#f5a524;background:rgba(245,165,36,0.08)}
+.status-warn .dot{background:#f5a524}
+.status-bad{color:#ff5c5c;border-color:#ff5c5c;background:rgba(255,92,92,0.08)}
+.status-bad .dot{background:#ff5c5c}
 input[type=range]{-webkit-appearance:none;height:22px;background:var(--panel-alt);cursor:pointer;margin:0;border-radius:6px}
 input[type=range]:focus{outline:0}
 input[type=range]::-webkit-slider-runnable-track{width:100%;height:2px;cursor:pointer;background:var(--text);border-radius:0;border:0}
@@ -802,6 +810,7 @@ select{border:1px solid var(--border);font-size:14px;height:22px;outline:0;borde
 <div id="top-bar">
 <button id="get-still">Capture</button>
 <button id="toggle-stream">Start Stream</button>
+<span id="status-pill" class="status-pill status-warn"><span class="dot"></span><span id="status-text">Initializing...</span></span>
 <div id="controls-group">
 <div class="control-row">
 <label for="framesize">Resolution:</label>
@@ -847,6 +856,10 @@ select{border:1px solid var(--border);font-size:14px;height:22px;outline:0;borde
 <div style="display:flex;flex-direction:column;gap:4px;flex:1">
 <span style="font-weight:600">Camera: <span id="device-name">Loading...</span></span>
 <span style="font-size:12px;color:var(--muted)">ID: <span id="device-id">--</span></span>
+<div style="display:flex;gap:12px;font-size:12px;color:var(--muted)">
+<span id="wifi-status">WiFi: --</span>
+<span id="mqtt-status">MQTT: --</span>
+</div>
 </div>
 <button id="close-panel" class="small" style="padding:0 6px;line-height:20px;margin:0">✕</button>
 </div>
@@ -1064,6 +1077,33 @@ fetch(query).then(response=>{
 console.log(`Control updated: ${el.id}=${value}`);
 });
 }
+// Status helpers
+const statusPill=document.getElementById('status-pill');
+const statusText=document.getElementById('status-text');
+const wifiStatus=document.getElementById('wifi-status');
+const mqttStatus=document.getElementById('mqtt-status');
+const setPill=(mode,text)=>{
+ if(!statusPill||!statusText)return;
+ statusPill.classList.remove('status-ok','status-warn','status-bad');
+ statusPill.classList.add(mode);
+ statusText.textContent=text;
+};
+const setConnectivity=(rssi,mqtt)=>{
+ if(wifiStatus){
+ let wifiLabel='--';
+ let wifiClass='status-warn';
+ if(typeof rssi==='number'){
+ wifiLabel=`WiFi: ${rssi} dBm`;
+ wifiClass=rssi>-60?'status-ok':(rssi>-75?'status-warn':'status-bad');
+ }
+ wifiStatus.textContent=wifiLabel;
+ wifiStatus.className=wifiClass;
+ }
+ if(mqttStatus){
+ mqttStatus.textContent=`MQTT: ${mqtt?"Connected":"Disconnected"}`;
+ mqttStatus.className=mqtt?'status-ok':'status-bad';
+ }
+};
 // Mobile panel toggle
 rightToggle.onclick=()=>rightPanel.classList.toggle('mobile-visible');
 closePanel.onclick=()=>rightPanel.classList.remove('mobile-visible');
@@ -1083,17 +1123,33 @@ if(state.chip_id){
 const shortId=state.chip_id.substring(0,8).toUpperCase();
 document.getElementById('device-id').textContent=shortId;
 }
+if(state.framesize!==undefined){
+updateValue(document.getElementById('framesize'),state.framesize,false);
+}
+if(state.quality!==undefined){
+updateValue(document.getElementById('quality'),state.quality,false);
+}
+if(state.camera_ready){
+setPill('status-ok','Ready');
+} else {
+setPill('status-warn','Camera not ready');
+}
+setConnectivity(state.wifi_rssi,state.mqtt_connected);
+}).catch(err=>{
+console.error('Status load failed',err);
 });
 // Stream controls
 const stopStream=()=>{
 view.src='';
 streamButton.textContent='Start Stream';
 isStreaming=false;
+ setPill('status-ok','Ready');
 };
 const startStream=()=>{
 view.src=`${baseHost}/stream`;
 streamButton.textContent='Stop Stream';
 isStreaming=true;
+ setPill('status-ok','Streaming');
 };
 stillButton.onclick=()=>{
 stopStream();
