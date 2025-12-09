@@ -114,7 +114,7 @@ void setup() {
     loadMotionConfig();
 
     // Setup PIR motion sensor
-    pinMode(PIR_PIN, INPUT);
+    pinMode(PIR_PIN, INPUT_PULLUP);
     attachInterrupt(digitalPinToInterrupt(PIR_PIN), motionISR, RISING);
     Serial.printf("[SETUP] PIR sensor initialized on GPIO%d (motion detection %s)\n", 
                   PIR_PIN, motionEnabled ? "enabled" : "disabled");
