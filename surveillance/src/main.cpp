@@ -765,7 +765,8 @@ a{color:var(--text)}
 #stream-area{display:flex;flex:1;min-height:0;gap:12px;padding:12px}
 #stream-container{flex:1;display:flex;flex-direction:column;min-width:0;background:var(--panel-alt);border:1px solid var(--border);border-radius:8px;overflow:hidden}
 #stream-container img{max-width:100%;max-height:100%;object-fit:contain}
-#right-panel{width:300px;background:var(--panel);border:1px solid var(--border);border-radius:8px;overflow-y:auto;display:flex;flex-direction:column}
+#right-panel{width:300px;background:var(--panel);border:1px solid var(--border);border-radius:8px;overflow-y:auto;display:flex;flex-direction:column;transition:width 0.3s ease,opacity 0.3s ease}
+#right-panel.collapsed{width:0;opacity:0;overflow:hidden;padding:0;border:0}
 #right-toggle{display:none;width:30px;height:30px;padding:0;margin:0;background:var(--accent)}
 .panel-header{padding:12px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;font-weight:600}
 .panel-content{padding:12px;overflow-y:auto;flex:1}
@@ -1121,7 +1122,13 @@ const setConnectivity=(rssi,mqtt)=>{
 };
 // Mobile panel toggle
 rightToggle.onclick=()=>rightPanel.classList.toggle('mobile-visible');
-closePanel.onclick=()=>rightPanel.classList.remove('mobile-visible');
+closePanel.onclick=()=>{
+ if(window.innerWidth<=768){
+ rightPanel.classList.remove('mobile-visible');
+ } else {
+ rightPanel.classList.toggle('collapsed');
+ }
+};
 // Load initial settings and device info
 fetch(`${baseHost}/status`).then(response=>response.json()).then(state=>{
 document.querySelectorAll('.default-action').forEach(el=>{
