@@ -767,7 +767,7 @@ a{color:var(--text)}
 #stream-container img{max-width:100%;max-height:100%;object-fit:contain}
 #right-panel{width:300px;background:var(--panel);border:1px solid var(--border);border-radius:8px;overflow-y:auto;display:flex;flex-direction:column;transition:width 0.3s ease,opacity 0.3s ease}
 #right-panel.collapsed{width:0;opacity:0;overflow:hidden;padding:0;border:0}
-#right-toggle{display:none;width:30px;height:30px;padding:0;margin:0;background:var(--accent)}
+#right-toggle{width:30px;height:30px;padding:0;margin:0;background:var(--accent)}
 .panel-header{padding:12px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;font-weight:600}
 .panel-content{padding:12px;overflow-y:auto;flex:1}
 .input-group{display:flex;flex-wrap:nowrap;line-height:22px;margin:8px 0;padding:8px;border:1px solid var(--border);border-radius:8px;background:var(--panel-alt);gap:8px;align-items:center}
@@ -1120,8 +1120,14 @@ const setConnectivity=(rssi,mqtt)=>{
  mqttStatus.className=mqtt?'status-ok':'status-bad';
  }
 };
-// Mobile panel toggle
-rightToggle.onclick=()=>rightPanel.classList.toggle('mobile-visible');
+// Panel toggle (works for both desktop collapsed and mobile slide-in)
+rightToggle.onclick=()=>{
+ if(window.innerWidth<=768){
+ rightPanel.classList.toggle('mobile-visible');
+ } else {
+ rightPanel.classList.toggle('collapsed');
+ }
+};
 closePanel.onclick=()=>{
  if(window.innerWidth<=768){
  rightPanel.classList.remove('mobile-visible');
