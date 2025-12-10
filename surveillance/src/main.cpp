@@ -464,7 +464,7 @@ void setupMQTT() {
     Serial.println("Setting up MQTT...");
     mqttClient.setServer(MQTT_SERVER, MQTT_PORT);
     mqttClient.setCallback(mqttCallback);
-    mqttClient.setBufferSize(1024); // Increase buffer for JSON messages
+    mqttClient.setBufferSize(512);  // Reduced from 1024 to save memory
 
     reconnectMQTT();
 }
