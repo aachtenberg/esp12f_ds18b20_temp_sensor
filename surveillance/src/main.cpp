@@ -96,6 +96,20 @@ void setup() {
     Serial.println("========================================");
     Serial.println("[SETUP] Starting initialization...");
 
+    // Initialize Double Reset Detector FIRST - before any other setup
+    Serial.println("[SETUP] Initializing Double Reset Detector...");
+    drd = new DoubleResetDetector(DRD_TIMEOUT, DRD_ADDRESS);
+    
+    if (drd->detectDoubleReset()) {
+        Serial.println();
+        Serial.println("========================================");
+        Serial.println("  DOUBLE RESET DETECTED");
+        Serial.println("  Starting WiFi Configuration Portal");
+        Serial.println("========================================");
+        Serial.println();
+        // Will be handled in setupWiFi()
+    }
+
     // Load device name from filesystem
     Serial.println("[SETUP] Loading device name...");
     loadDeviceName();
@@ -344,9 +358,6 @@ void handleMotionDetection() {
 void setupWiFi() {
     Serial.println("Setting up WiFi...");
 
-    // Initialize Double Reset Detector
-    drd = new DoubleResetDetector(DRD_TIMEOUT, DRD_ADDRESS);
-
     // Set WiFi mode
     WiFi.mode(WIFI_STA);
 
@@ -373,13 +384,9 @@ void setupWiFi() {
     wifiManager.setConnectTimeout(WIFI_CONNECT_TIMEOUT / 1000);
 
     // Check for double reset - enter config portal if detected
-    if (drd->detectDoubleReset()) {
-        Serial.println();
-        Serial.println("========================================");
-        Serial.println("  DOUBLE RESET DETECTED");
-        Serial.println("  Starting WiFi Configuration Portal");
-        Serial.println("========================================");
-        Serial.println();
+    bool doubleResetDetected = drd->detectDoubleReset();
+    
+    if (doubleResetDetected) {
         Serial.print("[WiFi] Connect to AP: ");
         Serial.println(apName);
         Serial.println("[WiFi] Then open http://192.168.4.1 in browser");
