@@ -2,7 +2,7 @@
 #define DEVICE_CONFIG_H
 
 // Device identification
-#define DEVICE_NAME "ESP32-S3-Surveillance"
+#define DEVICE_NAME "ESP32-CAM-Surveillance"
 #define FIRMWARE_VERSION "1.0.0"
 
 // WiFi settings
@@ -13,10 +13,8 @@
 #define MQTT_PORT 1883
 #define MQTT_RECONNECT_INTERVAL 5000  // 5 seconds
 
-// MQTT Base Topic (will be appended with device name)
+// MQTT Topics (base paths - device-specific topics built dynamically)
 #define MQTT_TOPIC_BASE "surveillance"
-
-// MQTT Topic Suffixes
 #define MQTT_TOPIC_STATUS_SUFFIX "/status"
 #define MQTT_TOPIC_IMAGE_SUFFIX "/image"
 #define MQTT_TOPIC_MOTION_SUFFIX "/motion"
@@ -28,26 +26,42 @@
 #define CAPTURE_INTERVAL 60000  // Capture every 60 seconds (configurable)
 #define MOTION_DETECTION_ENABLED true
 
+// Camera-based motion detection settings
+#define MOTION_CHECK_INTERVAL 3000  // Check for motion every 3 seconds
+#define MOTION_BLOCK_SIZE 16        // Divide frame into 16x16 pixel blocks
+#define MOTION_THRESHOLD 25         // Pixel difference threshold (0-255)
+#define MOTION_CHANGED_BLOCKS 25    // Number of blocks that must change to trigger motion (was 15)
+
 // Web server settings
 #define WEB_SERVER_PORT 80
 
 // Status LED (if available)
 #define STATUS_LED_PIN 2
 
-// Flash LED for debugging (GPIO 4 - ESP32-CAM flash)
-#define FLASH_LED_PIN 4
+// Flash/Strobe LED for motion indication
+#define FLASH_PIN 4  // GPIO4 for AI-Thinker ESP32-CAM (Flash LED)
+#define FLASH_PULSE_MS 200  // 200ms pulse duration for motion flash
 
 // PIR Motion Sensor (AM312)
 #if defined(CAMERA_MODEL_ESP32S3_EYE)
-  #define PIR_PIN 14  // GPIO14 for ESP32-S3
+  #define PIR_PIN 14  // GPIO14 for ESP32-S3 (not used by camera)
 #else
   #define PIR_PIN 13  // GPIO13 for AI-Thinker ESP32-CAM
 #endif
 
 #define PIR_DEBOUNCE_MS 5000  // 5 seconds between motion triggers
 
-// Double reset detector
-#define DRD_TIMEOUT 3
-#define DRD_ADDRESS 0x00
+// Triple-reset detector (for entering config portal)
+#define RESET_DETECT_TIMEOUT 2       // 2 second window for triple-reset
+#define RESET_DETECT_ADDRESS 0x00    // RTC memory address for reset counter
+#define RESET_COUNT_THRESHOLD 3      // Number of resets to trigger config portal
+
+// Crash loop recovery
+#define CRASH_LOOP_THRESHOLD 5       // 5 consecutive crashes triggers recovery mode
+#define CRASH_LOOP_MAGIC 0xDEADBEEF  // Magic number to detect incomplete boots
+
+// WiFi fallback AP mode
+#define WIFI_FALLBACK_TIMEOUT 60000  // 60 seconds before starting fallback AP
+#define CONFIG_PORTAL_TIMEOUT 120    // 2 minutes portal timeout
 
 #endif // DEVICE_CONFIG_H

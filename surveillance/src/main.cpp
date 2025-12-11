@@ -6,14 +6,27 @@
 #include <ESPAsyncWebServer.h>
 #include <Update.h>
 #include <base64.h>
-#include <ESP_DoubleResetDetector.h>
 #include <LittleFS.h>
+#include <SD_MMC.h>
+#include <esp_system.h>
+#include <driver/sdmmc_host.h>
+#include <sdmmc_cmd.h>
+#include <img_converters.h>
 #include "camera_config.h"
 #include "device_config.h"
 #include "secrets.h"
 
-// Create Double Reset Detector instance (uses DRD_TIMEOUT, DRD_ADDRESS from device_config.h)
-DoubleResetDetector* drd;
+// RTC memory for reset detection and crash loop recovery
+// These survive software resets but are cleared on power loss
+RTC_NOINIT_ATTR uint32_t rtcResetCount;      // Counts rapid resets
+RTC_NOINIT_ATTR uint32_t rtcResetTimestamp;  // Timestamp of last reset
+RTC_NOINIT_ATTR uint32_t rtcCrashLoopFlag;   // Magic number if boot incomplete
+RTC_NOINIT_ATTR uint32_t rtcCrashCount;      // Consecutive crash count
+
+// Boot/recovery state
+const char* configPortalReason = "none";     // Why portal was triggered
+bool fallbackAPActive = false;                // Fallback AP is running
+unsigned long wifiDisconnectTime = 0;         // When WiFi first disconnected
 
 // Device name storage
 char deviceName[40] = "Surveillance Cam";
@@ -25,10 +38,21 @@ char deviceMac[18];     // XX:XX:XX:XX:XX:XX format
 
 // Motion detection config
 const char* MOTION_CONFIG_FILE = "/motion_config.txt";
-bool motionEnabled = true;  // Default enabled
+bool motionEnabled = true;  // Default ENABLED - now uses proper JPEG decoding
 unsigned long motionDetectCount = 0;
 volatile bool motionDetected = false;
 unsigned long lastMotionTime = 0;
+unsigned long flashOffTime = 0;  // Track when to turn off flash LED
+
+// Flash LED config
+const char* FLASH_CONFIG_FILE = "/flash_config.txt";
+bool flashEnabled = true;   // Flash during captures (always ON, not configurable)
+bool flashMotionEnabled = false;  // Flash for motion indicator (default OFF - too bright for continuous use)
+bool flashManualOn = false;  // Manual flashlight mode (default OFF)
+
+// SD card capture storage
+bool sdReady = false;
+const char* SD_CAPTURE_DIR = "/captures";
 
 // Global objects
 WiFiClient espClient;
@@ -42,6 +66,7 @@ unsigned long lastMqttReconnect = 0;
 unsigned long lastWiFiCheck = 0;
 unsigned long lastMetricsPublish = 0;
 unsigned long lastMqttStatus = 0;
+unsigned long lastMotionCheck = 0;
 
 // Device state
 bool cameraReady = false;
@@ -52,15 +77,24 @@ unsigned long captureCount = 0;
 unsigned long cameraErrors = 0;
 unsigned long mqttPublishCount = 0;
 
+// Camera motion detection
+uint8_t* previousFrame = NULL;
+size_t previousFrameSize = 0;
+
 // Function declarations
 void loadDeviceName();
 void saveDeviceName(const char* name);
 void loadMotionConfig();
 void saveMotionConfig(bool enabled);
+void loadFlashConfig();
+void saveFlashConfig(bool illumination, bool motion);
 void getDeviceChipId();
 void getDeviceMacAddress();
 void IRAM_ATTR motionISR();
+bool checkCameraMotion();
 void setupWiFi();
+void setupSD();
+bool deleteAllCaptures();
 void setupCamera();
 void setupMQTT();
 void setupWebServer();
@@ -84,7 +118,12 @@ void handleCapture(AsyncWebServerRequest *request);
 void handleStream(AsyncWebServerRequest *request);
 void handleControl(AsyncWebServerRequest *request);
 void handleMotionControl(AsyncWebServerRequest *request);
+void handleFlashControl(AsyncWebServerRequest *request);
+void handleWiFiReset(AsyncWebServerRequest *request);
 void handleMotionDetection();
+void checkResetCounter();
+void clearCrashLoop();
+void checkWiFiFallback();
 
 void setup() {
     Serial.begin(115200);
@@ -96,19 +135,8 @@ void setup() {
     Serial.println("========================================");
     Serial.println("[SETUP] Starting initialization...");
 
-    // Initialize Double Reset Detector FIRST - before any other setup
-    Serial.println("[SETUP] Initializing Double Reset Detector...");
-    drd = new DoubleResetDetector(DRD_TIMEOUT, DRD_ADDRESS);
-    
-    if (drd->detectDoubleReset()) {
-        Serial.println();
-        Serial.println("========================================");
-        Serial.println("  DOUBLE RESET DETECTED");
-        Serial.println("  Starting WiFi Configuration Portal");
-        Serial.println("========================================");
-        Serial.println();
-        // Will be handled in setupWiFi()
-    }
+    // Check reset counter and crash loop FIRST (before anything else)
+    checkResetCounter();
 
     // Load device name from filesystem
     Serial.println("[SETUP] Loading device name...");
@@ -123,16 +151,22 @@ void setup() {
     Serial.println("[SETUP] Loading motion config...");
     loadMotionConfig();
 
-    // Setup PIR motion sensor
-    pinMode(PIR_PIN, INPUT_PULLUP);
-    attachInterrupt(digitalPinToInterrupt(PIR_PIN), motionISR, RISING);
-    Serial.printf("[SETUP] PIR sensor initialized on GPIO%d (motion detection %s)\n", 
-                  PIR_PIN, motionEnabled ? "enabled" : "disabled");
+    // PIR sensor disabled for testing
+    // pinMode(PIR_PIN, INPUT_PULLDOWN);
+    // attachInterrupt(digitalPinToInterrupt(PIR_PIN), motionISR, RISING);
+    Serial.println("[SETUP] PIR sensor disabled");
 
-    // Setup flash LED for debugging
-    pinMode(FLASH_LED_PIN, OUTPUT);
-    digitalWrite(FLASH_LED_PIN, LOW);
-    Serial.printf("[SETUP] Flash LED initialized on GPIO%d for debugging\n", FLASH_LED_PIN);
+    // Load flash config before GPIO init
+    Serial.println("[SETUP] Loading flash config...");
+    loadFlashConfig();
+
+    // Flash LED for capture illumination (controlled during capture only)
+    pinMode(FLASH_PIN, OUTPUT);
+    digitalWrite(FLASH_PIN, LOW);
+    Serial.printf("[SETUP] Flash LED initialized on GPIO%d (capture flash=%s)\n", FLASH_PIN, flashEnabled ? "ON" : "OFF");
+
+    // Mount SD card (1-bit mode for ESP32-CAM) for capture storage
+    setupSD();
 
     // Disable WiFi power saving for consistent streaming performance
     WiFi.setSleep(false);
@@ -146,8 +180,27 @@ void setup() {
     // Setup WiFi
     setupWiFi();
 
-    // Setup Camera
-    setupCamera();
+    // Initialize camera in background (non-blocking)
+    // Camera will be initialized asynchronously, web server will respond with camera_ready=false until done
+    xTaskCreate(
+        [](void* param) {
+            Serial.println("[Camera] Initializing in background task...");
+            cameraReady = initCamera();
+            if (!cameraReady) {
+                Serial.println("[Camera] Initialization FAILED!");
+                Serial.printf("[Camera] cameraReady = %d\n", cameraReady);
+            } else {
+                Serial.println("[Camera] Initialization complete!");
+                Serial.printf("[Camera] cameraReady = %d\n", cameraReady);
+            }
+            vTaskDelete(NULL);
+        },
+        "CameraInit",
+        4096,
+        NULL,
+        1,
+        NULL
+    );
 
     // Setup MQTT
     setupMQTT();
@@ -158,6 +211,9 @@ void setup() {
     Serial.println("Setup complete!");
     Serial.printf("Free heap: %d bytes\n", ESP.getFreeHeap());
     Serial.printf("PSRAM free: %d bytes\n", ESP.getFreePsram());
+
+    // Clear crash loop flag - we made it through setup successfully
+    clearCrashLoop();
 
     // Log boot event
     logEventToMQTT("device_boot", "info");
@@ -170,8 +226,8 @@ void setup() {
 void loop() {
     unsigned long currentMillis = millis();
 
-    // DRD loop - CRITICAL: must be called to detect double reset
-    drd->loop();
+    // Check for WiFi fallback AP mode
+    checkWiFiFallback();
 
     // Handle WiFi reconnection
     if (WiFi.status() != WL_CONNECTED) {
@@ -179,6 +235,14 @@ void loop() {
             Serial.println("WiFi disconnected, attempting reconnection...");
             WiFi.reconnect();
             lastWiFiCheck = currentMillis;
+        }
+    } else {
+        // WiFi reconnected - stop fallback AP if running
+        if (fallbackAPActive) {
+            Serial.println("[WiFi] STA reconnected, stopping fallback AP");
+            WiFi.softAPdisconnect(true);
+            fallbackAPActive = false;
+            wifiDisconnectTime = 0;
         }
     }
 
@@ -201,18 +265,50 @@ void loop() {
         }
     }
 
-    // Handle motion detection
-    if (motionDetected && motionEnabled) {
-        handleMotionDetection();
-    }
+    // Camera-based motion detection (throttled to every 3 seconds)
+    if (motionEnabled && cameraReady) {
+        if (currentMillis - lastMotionCheck >= MOTION_CHECK_INTERVAL) {
+            if (checkCameraMotion()) {
+                // Motion detected - publish to MQTT
+                if (mqttConnected) {
+                    JsonDocument doc;
+                    doc["device"] = deviceName;
+                    doc["motion"] = true;
+                    doc["timestamp"] = currentMillis / 1000;
+                    doc["count"] = motionDetectCount;
 
-    // Periodic image capture
-    if (cameraReady && mqttConnected) {
-        if (currentMillis - lastCaptureTime >= CAPTURE_INTERVAL) {
-            captureAndPublish();
-            lastCaptureTime = currentMillis;
+                    String output;
+                    serializeJson(doc, output);
+
+                    String topic = String(MQTT_TOPIC_BASE) + "/" + deviceName + "/motion";
+                    mqttClient.publish(topic.c_str(), output.c_str(), false);
+                    Serial.println("[Motion] Published to MQTT");
+                }
+                
+                // Flash LED on motion if enabled (respects both motion flash setting and manual override)
+                if (flashMotionEnabled && !flashManualOn) {
+                    digitalWrite(FLASH_PIN, HIGH);
+                    flashOffTime = currentMillis + FLASH_PULSE_MS;
+                    Serial.printf("[FLASH] Motion indicator triggered for %d ms\n", FLASH_PULSE_MS);
+                }
+            }
+            lastMotionCheck = currentMillis;
         }
     }
+
+    // Turn off flash LED after motion pulse duration (only if not in manual mode)
+    if (!flashManualOn && flashOffTime > 0 && currentMillis >= flashOffTime) {
+        digitalWrite(FLASH_PIN, LOW);
+        flashOffTime = 0;
+    }
+
+    // Periodic image capture - DISABLED (motion-only mode)
+    // if (cameraReady && mqttConnected) {
+    //     if (currentMillis - lastCaptureTime >= CAPTURE_INTERVAL) {
+    //         captureAndPublish();
+    //         lastCaptureTime = currentMillis;
+    //     }
+    // }
 
     // Publish metrics to MQTT every 60 seconds
     if (currentMillis - lastMetricsPublish >= 60000) {
@@ -222,6 +318,102 @@ void loop() {
 
     // Minimal delay - yield to system tasks
     yield();
+}
+
+bool checkCameraMotion() {
+    // Proper motion detection: decode JPEG to RGB565, then compare pixels
+    // Based on MJPEG2SD algorithm
+    
+    if (!cameraReady) return false;
+
+    camera_fb_t* fb = capturePhoto();
+    if (!fb) {
+        Serial.println("[Motion] Failed to capture frame");
+        return false;
+    }
+
+    bool motionDetected = false;
+
+    // Downsample dimensions (96x96 at 8x scale from typical SVGA 800x600)
+    const int DOWNSAMPLE_WIDTH = 96;
+    const int DOWNSAMPLE_HEIGHT = 96;
+    const int DOWNSAMPLE_SIZE = DOWNSAMPLE_WIDTH * DOWNSAMPLE_HEIGHT;
+    
+    // Allocate RGB565 buffer for decoded JPEG (first time only)
+    static uint8_t* rgb565Buffer = NULL;
+    if (rgb565Buffer == NULL) {
+        rgb565Buffer = (uint8_t*)ps_malloc(DOWNSAMPLE_SIZE * 2); // RGB565 = 2 bytes per pixel
+    }
+    
+    if (previousFrame == NULL) {
+        // First frame - allocate grayscale buffer
+        previousFrame = (uint8_t*)malloc(DOWNSAMPLE_SIZE);
+        if (previousFrame && rgb565Buffer) {
+            // Decode JPEG to RGB565 at downsampled resolution
+            if (jpg2rgb565(fb->buf, fb->len, rgb565Buffer, JPG_SCALE_8X)) {
+                // Convert RGB565 to grayscale
+                for (int i = 0; i < DOWNSAMPLE_SIZE; i++) {
+                    uint16_t pixel = ((uint16_t*)rgb565Buffer)[i];
+                    // Extract RGB from RGB565: RRRRRGGGGGGBBBBB
+                    uint8_t r = (pixel >> 11) & 0x1F;  // 5 bits
+                    uint8_t g = (pixel >> 5) & 0x3F;   // 6 bits
+                    uint8_t b = pixel & 0x1F;          // 5 bits
+                    // Scale to 8-bit and convert to grayscale
+                    previousFrame[i] = (r * 8 + g * 4 + b * 8) / 3;
+                }
+                previousFrameSize = DOWNSAMPLE_SIZE;
+                Serial.printf("[Motion] First frame decoded - %dx%d grayscale\n", DOWNSAMPLE_WIDTH, DOWNSAMPLE_HEIGHT);
+            } else {
+                Serial.println("[Motion] JPEG decode failed");
+            }
+        }
+        returnFrameBuffer(fb);
+        return false;
+    }
+
+    // Decode current frame to RGB565
+    if (!jpg2rgb565(fb->buf, fb->len, rgb565Buffer, JPG_SCALE_8X)) {
+        Serial.println("[Motion] JPEG decode failed");
+        returnFrameBuffer(fb);
+        return false;
+    }
+
+    // Convert to grayscale and compare
+    int changedPixels = 0;
+    int totalPixels = DOWNSAMPLE_SIZE;
+    
+    for (int i = 0; i < DOWNSAMPLE_SIZE; i++) {
+        // Convert RGB565 pixel to grayscale
+        uint16_t pixel = ((uint16_t*)rgb565Buffer)[i];
+        uint8_t r = (pixel >> 11) & 0x1F;
+        uint8_t g = (pixel >> 5) & 0x3F;
+        uint8_t b = pixel & 0x1F;
+        uint8_t currentGray = (r * 8 + g * 4 + b * 8) / 3;
+        
+        // Compare with previous frame
+        int diff = abs((int)currentGray - (int)previousFrame[i]);
+        if (diff > MOTION_THRESHOLD) {
+            changedPixels++;
+        }
+        
+        // Update previous frame buffer
+        previousFrame[i] = currentGray;
+    }
+
+    // Debug: Always log the change analysis
+    float changePercent = (float)changedPixels / totalPixels * 100.0;
+    Serial.printf("[Motion] Analysis: %d/%d pixels changed (%.1f%%) - threshold: %d pixels\n",
+                  changedPixels, totalPixels, changePercent, MOTION_CHANGED_BLOCKS);
+
+    // Determine if motion detected
+    if (changedPixels >= MOTION_CHANGED_BLOCKS) {
+        motionDetected = true;
+        Serial.printf("[Motion] *** MOTION DETECTED *** Count: %lu\n", motionDetectCount + 1);
+        motionDetectCount++;
+    }
+
+    returnFrameBuffer(fb);
+    return motionDetected;
 }
 
 void loadDeviceName() {
@@ -319,6 +511,275 @@ void saveMotionConfig(bool enabled) {
     }
 }
 
+void loadFlashConfig() {
+    if (!LittleFS.begin(true)) {
+        Serial.println("[FS] Warning: LittleFS mount issue, using default flash config");
+        return;
+    }
+
+    if (LittleFS.exists(FLASH_CONFIG_FILE)) {
+        File file = LittleFS.open(FLASH_CONFIG_FILE, "r");
+        if (file) {
+            String line1 = file.readStringUntil('\n');
+            String line2 = file.readStringUntil('\n');
+            line1.trim();
+            line2.trim();
+            flashEnabled = (line1 == "1" || line1.equalsIgnoreCase("true"));
+            flashMotionEnabled = (line2 == "1" || line2.equalsIgnoreCase("true"));
+            Serial.printf("[Config] Loaded flash config: illumination=%s, motion=%s\n",
+                          flashEnabled ? "enabled" : "disabled",
+                          flashMotionEnabled ? "enabled" : "disabled");
+            file.close();
+        }
+    } else {
+        Serial.println("[Config] No saved flash config, using defaults (both disabled)");
+    }
+}
+
+void saveFlashConfig(bool illumination, bool motion) {
+    if (!LittleFS.begin(true)) {
+        Serial.println("[FS] Warning: Cannot save flash config due to filesystem issue");
+        return;
+    }
+
+    File file = LittleFS.open(FLASH_CONFIG_FILE, "w");
+    if (file) {
+        file.println(illumination ? "1" : "0");
+        file.println(motion ? "1" : "0");
+        file.close();
+        Serial.printf("[FS] Saved flash config: illumination=%s, motion=%s\n",
+                      illumination ? "enabled" : "disabled",
+                      motion ? "enabled" : "disabled");
+    } else {
+        Serial.println("[FS] Failed to save flash config");
+    }
+}
+
+// SD Card recovery: graceful unmount before reboot to prevent corruption on power loss
+// Set to 0 to disable if it causes issues
+#define SD_GRACEFUL_UNMOUNT 1
+#define SD_UNMOUNT_DELAY_MS 500
+
+void gracefulSDShutdown() {
+    #if SD_GRACEFUL_UNMOUNT
+    if (sdReady) {
+        Serial.println("[SD] Gracefully unmounting before shutdown...");
+        SD_MMC.end();
+        vTaskDelay(pdMS_TO_TICKS(SD_UNMOUNT_DELAY_MS));  // Give card time to finish writes
+        Serial.println("[SD] Unmount complete");
+    }
+    #endif
+}
+
+void setupSD() {
+    Serial.println("[SD] Mounting SD card with low-level sdmmc API...");
+    
+    #if SD_GRACEFUL_UNMOUNT
+    // Always unmount any previous mount first (ignore errors)
+    SD_MMC.end();
+    vTaskDelay(pdMS_TO_TICKS(100));
+    #endif
+    
+    // Low-level sdmmc configuration (fixes 98% of SD card issues)
+    sdmmc_host_t host = SDMMC_HOST_DEFAULT();
+    host.max_freq_khz = 19000;              // Stay under 20 MHz for compatibility
+    host.flags = SDMMC_HOST_FLAG_1BIT;      // 1-bit mode (CLK, CMD, D0 only)
+    host.command_timeout_ms = 1000;         // Critical: prevents timeouts
+    
+    // Initialize host
+    esp_err_t ret = sdmmc_host_init();
+    if (ret != ESP_OK) {
+        Serial.printf("[SD] Host init failed: 0x%x\n", ret);
+        sdReady = false;
+        return;
+    }
+    
+    // Force 400 kHz clock during card initialization
+    sdmmc_host_set_card_clk(host.slot, 400);
+    
+    // Initialize card
+    sdmmc_card_t card;
+    ret = sdmmc_card_init(&host, &card);
+    if (ret != ESP_OK) {
+        Serial.printf("[SD] Card init failed: 0x%x\n", ret);
+        sdmmc_host_deinit();
+        sdReady = false;
+        return;
+    }
+    
+    // Switch back to full speed (19 MHz)
+    sdmmc_host_set_card_clk(host.slot, 19000);
+    
+    // Print card info
+    Serial.printf("[SD] Card initialized: %d MB, speed=%d kHz\n",
+        card.csd.capacity / (1024 * 2),
+        host.max_freq_khz);
+    
+    // Now mount filesystem on top of initialized card
+    if (SD_MMC.begin("/sdcard", true, false, 19000000)) {
+        sdReady = true;
+        Serial.println("[SD] Filesystem mounted successfully");
+    } else {
+        Serial.println("[SD] Filesystem mount failed");
+        sdmmc_host_deinit();
+        sdReady = false;
+    }
+}
+
+bool deleteAllCaptures() {
+    if (!sdReady) {
+        Serial.println("[SD] Cannot delete captures - SD not ready");
+        return false;
+    }
+
+    File dir = SD_MMC.open(SD_CAPTURE_DIR);
+    if (!dir || !dir.isDirectory()) {
+        Serial.println("[SD] Capture directory missing");
+        return false;
+    }
+
+    size_t deleted = 0;
+    File entry = dir.openNextFile();
+    while (entry) {
+        if (!entry.isDirectory()) {
+            String path = entry.path();
+            entry.close();  // Close file before deleting
+            if (SD_MMC.remove(path)) {
+                deleted++;
+                Serial.printf("[SD] Deleted: %s\n", path.c_str());
+            } else {
+                Serial.printf("[SD] Failed to delete: %s\n", path.c_str());
+            }
+        } else {
+            entry.close();
+        }
+        entry = dir.openNextFile();
+    }
+    dir.close();
+
+    Serial.printf("[SD] Deleted %u captures\n", (unsigned int)deleted);
+    return deleted > 0 || deleted == 0;  // Return true even if nothing to delete
+}
+
+// ==================== Reset Detection & Recovery ====================
+
+void checkResetCounter() {
+    // Check for triple-reset and crash loop conditions
+    // This must be called early in setup() before other initialization
+    
+    uint32_t currentTime = millis();
+    
+    // Check for crash loop first (5 consecutive incomplete boots)
+    if (rtcCrashLoopFlag == CRASH_LOOP_MAGIC) {
+        rtcCrashCount++;
+        Serial.printf("[RESET] Incomplete boot detected, crash count: %lu\n", rtcCrashCount);
+        
+        if (rtcCrashCount >= CRASH_LOOP_THRESHOLD) {
+            Serial.println("[RESET] CRASH LOOP RECOVERY - entering config portal");
+            configPortalReason = "crash_recovery";
+            rtcCrashCount = 0;  // Reset for next time
+        }
+    } else {
+        // Fresh power-on (or RTC cleared), reset crash counter
+        rtcCrashCount = 0;
+        rtcResetCount = 0;      // Also clear reset count on power-on
+        rtcResetTimestamp = 0;
+    }
+    
+    // Set crash loop flag (cleared in clearCrashLoop after successful boot)
+    rtcCrashLoopFlag = CRASH_LOOP_MAGIC;
+    
+    // Check for triple-reset (3 resets within 2 seconds)
+    // Only if not already in crash recovery mode
+    if (strcmp(configPortalReason, "crash_recovery") != 0) {
+        // Sanity check: reset counter should be reasonable (0-10)
+        if (rtcResetCount > 10) {
+            Serial.printf("[RESET] Reset counter corrupted (%lu), clearing\n", rtcResetCount);
+            rtcResetCount = 0;
+            rtcResetTimestamp = 0;
+        }
+        
+        // Check if this reset is within the timeout window of the last one
+        if (rtcResetTimestamp != 0 && rtcResetCount > 0 && rtcResetCount < 10) {
+            // RTC timestamp was set and counter is valid
+            rtcResetCount++;
+            Serial.printf("[RESET] Reset count: %lu (within window)\n", rtcResetCount);
+            
+            if (rtcResetCount >= RESET_COUNT_THRESHOLD) {
+                Serial.println("[RESET] TRIPLE RESET DETECTED - entering config portal");
+                configPortalReason = "triple_reset";
+                rtcResetCount = 0;  // Reset for next time
+                rtcResetTimestamp = 0;
+            }
+        } else {
+            // First reset or outside window
+            rtcResetCount = 1;
+            Serial.println("[RESET] First reset, starting detection window");
+        }
+        
+        // Store timestamp for next boot
+        rtcResetTimestamp = 1;  // Mark that a reset occurred
+        
+        // Wait for reset window, then clear counter if no more resets
+        // This is done asynchronously - if device doesn't reset within window,
+        // the counter stays but timestamp check will fail on next boot
+        delay(RESET_DETECT_TIMEOUT * 1000);
+        
+        // If we get here, no more resets happened within window
+        if (strcmp(configPortalReason, "none") == 0) {
+            Serial.println("[RESET] Reset window expired, normal boot");
+            rtcResetCount = 0;
+            rtcResetTimestamp = 0;
+        }
+    }
+    
+    Serial.printf("[RESET] Boot reason: %s\n", configPortalReason);
+}
+
+void clearCrashLoop() {
+    // Called after successful boot (WiFi + camera + web server initialized)
+    rtcCrashLoopFlag = 0;
+    rtcCrashCount = 0;
+    Serial.println("[RESET] Crash loop flag cleared - boot successful");
+}
+
+void checkWiFiFallback() {
+    // Check if WiFi has been disconnected long enough to start fallback AP
+    unsigned long currentMillis = millis();
+    
+    if (WiFi.status() != WL_CONNECTED) {
+        // Track when WiFi first disconnected
+        if (wifiDisconnectTime == 0) {
+            wifiDisconnectTime = currentMillis;
+        }
+        
+        // Check if we've been disconnected long enough
+        if (!fallbackAPActive && (currentMillis - wifiDisconnectTime >= WIFI_FALLBACK_TIMEOUT)) {
+            Serial.println("[WiFi] Starting fallback AP mode");
+            
+            // Create AP name
+            String apName = String(deviceName);
+            apName.replace(" ", "-");
+            apName = "Cam-" + apName + "-Fallback";
+            
+            // Start AP alongside STA (device remains discoverable)
+            WiFi.mode(WIFI_AP_STA);
+            WiFi.softAP(apName.c_str());
+            
+            fallbackAPActive = true;
+            Serial.printf("[WiFi] Fallback AP started: %s\n", apName.c_str());
+            Serial.printf("[WiFi] AP IP: %s\n", WiFi.softAPIP().toString().c_str());
+            
+            logEventToMQTT("wifi_fallback_ap", "warning");
+        }
+    } else {
+        // WiFi is connected, reset disconnect timer
+        wifiDisconnectTime = 0;
+    }
+}
+
+// ==================== End Reset Detection & Recovery ====================
+
 void IRAM_ATTR motionISR() {
     motionDetected = true;
 }
@@ -336,17 +797,15 @@ void handleMotionDetection() {
     
     lastMotionTime = currentMillis;
     motionDetectCount++;
-
-    // Flash LED to indicate motion detected
-    digitalWrite(FLASH_LED_PIN, HIGH);
-    delay(100);
-    digitalWrite(FLASH_LED_PIN, LOW);
-    delay(100);
-    digitalWrite(FLASH_LED_PIN, HIGH);
-    delay(100);
-    digitalWrite(FLASH_LED_PIN, LOW);
     
     Serial.printf("[MOTION] Detected! Count: %lu\n", motionDetectCount);
+    
+    // Always flash on motion (save current manual state)
+    bool wasManualOn = flashManualOn;
+    if (!wasManualOn) {
+        digitalWrite(FLASH_PIN, HIGH);
+        Serial.println("[FLASH] Motion flash triggered");
+    }
     
     // Publish motion event to dedicated topic
     JsonDocument motionDoc;
@@ -367,12 +826,17 @@ void handleMotionDetection() {
     if (cameraReady) {
         captureAndPublish();
     }
+    
+    // Restore flash state after capture
+    if (!wasManualOn) {
+        digitalWrite(FLASH_PIN, LOW);
+    }
 }
 
 void setupWiFi() {
     Serial.println("Setting up WiFi...");
 
-    // Set WiFi mode
+    // Set WiFi mode - use AP_STA to allow fallback AP later
     WiFi.mode(WIFI_STA);
 
     // Create custom AP name based on device name
@@ -394,24 +858,67 @@ void setupWiFi() {
     });
 
     // WiFiManager configuration
-    wifiManager.setConfigPortalTimeout(180);
+    wifiManager.setConfigPortalTimeout(CONFIG_PORTAL_TIMEOUT);
     wifiManager.setConnectTimeout(WIFI_CONNECT_TIMEOUT / 1000);
 
-    // Check for double reset - enter config portal if detected
-    bool doubleResetDetected = drd->detectDoubleReset();
+    // Determine if we should enter config portal
+    bool enterConfigPortal = false;
     
-    if (doubleResetDetected) {
+    // Check 1: Triple-reset detection (already checked in checkResetCounter, sets configPortalReason)
+    if (strcmp(configPortalReason, "triple_reset") == 0) {
+        enterConfigPortal = true;
+    }
+    
+    // Check 2: Crash loop recovery (already checked in checkResetCounter, sets configPortalReason)
+    if (strcmp(configPortalReason, "crash_recovery") == 0) {
+        enterConfigPortal = true;
+    }
+
+    if (enterConfigPortal) {
+        Serial.println();
+        Serial.println("========================================");
+        Serial.printf("  CONFIG PORTAL TRIGGERED: %s\n", configPortalReason);
+        Serial.println("  Starting WiFi Configuration Portal");
+        Serial.println("========================================");
+        Serial.println();
         Serial.print("[WiFi] Connect to AP: ");
         Serial.println(apName);
         Serial.println("[WiFi] Then open http://192.168.4.1 in browser");
+        Serial.printf("[WiFi] Portal timeout: %d seconds\n", CONFIG_PORTAL_TIMEOUT);
         Serial.println();
 
         // Start config portal (blocking)
-        if (!wifiManager.startConfigPortal(apName.c_str())) {
-            Serial.println("[WiFi] Failed to connect after config portal");
-            Serial.println("[WiFi] Restarting...");
-            delay(3000);
-            ESP.restart();
+        bool portalResult = wifiManager.startConfigPortal(apName.c_str());
+        
+        if (!portalResult) {
+            // Portal timed out or failed - check if we have saved credentials
+            if (wifiManager.getWiFiIsSaved()) {
+                Serial.println("[WiFi] Portal timed out, but saved credentials exist");
+                Serial.println("[WiFi] Attempting to connect with saved credentials...");
+                
+                // Try to connect with saved credentials
+                WiFi.mode(WIFI_STA);
+                WiFi.begin();
+                
+                unsigned long startAttempt = millis();
+                while (WiFi.status() != WL_CONNECTED && millis() - startAttempt < WIFI_CONNECT_TIMEOUT) {
+                    delay(500);
+                    Serial.print(".");
+                }
+                Serial.println();
+                
+                if (WiFi.status() != WL_CONNECTED) {
+                    Serial.println("[WiFi] Failed to connect with saved credentials");
+                    Serial.println("[WiFi] Restarting...");
+                    delay(3000);
+                    ESP.restart();
+                }
+            } else {
+                Serial.println("[WiFi] Portal timed out, no saved credentials");
+                Serial.println("[WiFi] Restarting...");
+                delay(3000);
+                ESP.restart();
+            }
         }
 
         // Save device name if config was saved
@@ -428,7 +935,7 @@ void setupWiFi() {
     } else {
         // Normal boot - try to auto-connect
         Serial.println("[WiFi] Normal boot - attempting connection...");
-        Serial.println("[WiFi] (Double-reset within 3 seconds to enter config mode)");
+        Serial.printf("[WiFi] (Triple-reset within %d seconds to enter config mode)\n", RESET_DETECT_TIMEOUT);
 
         // Try to connect
         if (!wifiManager.autoConnect(apName.c_str())) {
@@ -449,9 +956,6 @@ void setupWiFi() {
         }
     }
 
-    // Clear DRD flag
-    drd->stop();
-
     Serial.println("WiFi connected!");
     Serial.print("Device name: ");
     Serial.println(deviceName);
@@ -462,23 +966,11 @@ void setupWiFi() {
     Serial.println(" dBm");
 }
 
-void setupCamera() {
-    Serial.println("Initializing camera...");
-
-    cameraReady = initCamera();
-
-    if (!cameraReady) {
-        Serial.println("Camera initialization failed!");
-    } else {
-        Serial.println("Camera ready!");
-    }
-}
-
 void setupMQTT() {
     Serial.println("Setting up MQTT...");
     mqttClient.setServer(MQTT_SERVER, MQTT_PORT);
     mqttClient.setCallback(mqttCallback);
-    mqttClient.setBufferSize(512);  // Reduced from 1024 to save memory
+    mqttClient.setBufferSize(1024); // Increase buffer for JSON messages
 
     reconnectMQTT();
 }
@@ -491,6 +983,45 @@ void setupWebServer() {
 
     // Capture endpoint
     server.on("/capture", HTTP_GET, handleCapture);
+
+    // Delete all captures on SD card
+    server.on("/captures/clear", HTTP_GET, [](AsyncWebServerRequest *request) {
+        if (!sdReady) {
+            request->send(500, "application/json", "{\"status\":\"sd_not_ready\"}");
+            return;
+        }
+        bool ok = deleteAllCaptures();
+        if (ok) {
+            request->send(200, "application/json", "{\"status\":\"cleared\"}");
+        } else {
+            request->send(500, "application/json", "{\"status\":\"error\"}");
+        }
+    });
+
+    // Format SD card - sets flag and reboots
+    server.on("/sd/format", HTTP_POST, [](AsyncWebServerRequest *request) {
+        // Check for confirmation parameter
+        if (!request->hasParam("confirm", true)) {
+            request->send(400, "application/json", "{\"status\":\"missing_confirmation\"}");
+            return;
+        }
+        
+        String confirm = request->getParam("confirm", true)->value();
+        if (confirm != "yes") {
+            request->send(400, "application/json", "{\"status\":\"not_confirmed\"}");
+            return;
+        }
+        
+        Serial.println("[SD] Format requested - rebooting...");
+        
+        request->send(200, "application/json", "{\"status\":\"rebooting_to_format\"}");
+        
+        delay(100);  // Allow response to be sent
+        gracefulSDShutdown();  // Clean up SD card before reboot
+        
+        Serial.println("[SD] Rebooting device...");
+        ESP.restart();
+    });
 
     // Stream endpoint (basic MJPEG)
     server.on("/stream", HTTP_GET, handleStream);
@@ -513,6 +1044,20 @@ void setupWebServer() {
         doc["camera_ready"] = cameraReady;
         doc["mqtt_connected"] = mqttConnected;
         doc["motion_enabled"] = motionEnabled;
+        doc["sd_ready"] = sdReady;
+        if (sdReady) {
+            doc["sd_size_mb"] = SD_MMC.cardSize() / (1024 * 1024);
+            doc["sd_used_mb"] = SD_MMC.usedBytes() / (1024 * 1024);
+        }
+        
+        // Reset/recovery status
+        doc["boot_reason"] = configPortalReason;
+        doc["crash_count"] = rtcCrashCount;
+        doc["fallback_ap_active"] = fallbackAPActive;
+        if (fallbackAPActive) {
+            doc["fallback_ap_ip"] = WiFi.softAPIP().toString();
+        }
+        doc["wifi_disconnect_time"] = wifiDisconnectTime > 0 ? (millis() - wifiDisconnectTime) / 1000 : 0;
 
         if (cameraReady) {
             sensor_t *s = esp_camera_sensor_get();
@@ -544,6 +1089,10 @@ void setupWebServer() {
 
     // Motion control endpoint
     server.on("/motion-control", HTTP_GET, handleMotionControl);
+    server.on("/flash-control", HTTP_GET, handleFlashControl);
+    
+    // WiFi reset endpoint (requires secret token)
+    server.on("/wifi-reset", HTTP_GET, handleWiFiReset);
 
     // OTA update endpoint (manual - upload firmware.bin)
     server.on("/update", HTTP_GET, [](AsyncWebServerRequest *request){
@@ -642,10 +1191,18 @@ void publishStatus() {
     doc["camera_ready"] = cameraReady;
     doc["motion_enabled"] = motionEnabled;
     doc["motion_count"] = motionDetectCount;
+    doc["flash_illumination"] = flashEnabled;
+    doc["flash_motion"] = flashMotionEnabled;
+    doc["flash_manual"] = flashManualOn;
     doc["free_heap"] = ESP.getFreeHeap();
     doc["free_psram"] = ESP.getFreePsram();
     doc["capture_count"] = captureCount;
     doc["camera_errors"] = cameraErrors;
+    
+    // Reset/recovery status
+    doc["boot_reason"] = configPortalReason;
+    doc["crash_count"] = rtcCrashCount;
+    doc["fallback_ap_active"] = fallbackAPActive;
 
     String output;
     serializeJson(doc, output);
@@ -655,9 +1212,23 @@ void publishStatus() {
 }
 
 void captureAndPublish() {
-    Serial.println("Capturing image...");
+    Serial.printf("[CAPTURE] Starting capture (manual=%s)...\n", 
+                  flashManualOn ? "ON" : "OFF");
+
+    // Always flash on capture (unless in manual mode)
+    if (!flashManualOn) {
+        digitalWrite(FLASH_PIN, HIGH);
+        Serial.println("[FLASH] LED ON for capture");
+        delay(100);  // Give flash time to reach full brightness
+    }
 
     camera_fb_t * fb = capturePhoto();
+    
+    // Turn off flash after capture (only if we turned it on)
+    if (!flashManualOn) {
+        digitalWrite(FLASH_PIN, LOW);
+        Serial.println("[FLASH] LED OFF after capture");
+    }
     if (!fb) {
         Serial.println("Capture failed");
         cameraErrors++;
@@ -691,9 +1262,23 @@ void captureAndPublish() {
 }
 
 void captureAndPublishWithImage() {
-    Serial.println("Capturing image with base64 encoding...");
+    Serial.printf("[CAPTURE] Starting image capture with base64 (manual=%s)...\n",
+                  flashManualOn ? "ON" : "OFF");
+
+    // Always flash on capture (unless in manual mode)
+    if (!flashManualOn) {
+        digitalWrite(FLASH_PIN, HIGH);
+        Serial.println("[FLASH] LED ON for image capture");
+        delay(100);  // Give flash time to reach full brightness
+    }
 
     camera_fb_t * fb = capturePhoto();
+    
+    // Turn off flash after capture (only if we turned it on)
+    if (!flashManualOn) {
+        digitalWrite(FLASH_PIN, LOW);
+        Serial.println("[FLASH] LED OFF after image capture");
+    }
     if (!fb) {
         Serial.println("Capture failed");
         cameraErrors++;
@@ -785,15 +1370,20 @@ a{color:var(--text)}
 #stream-area{display:flex;flex:1;min-height:0;gap:12px;padding:12px}
 #stream-container{flex:1;display:flex;flex-direction:column;min-width:0;background:var(--panel-alt);border:1px solid var(--border);border-radius:8px;overflow:hidden}
 #stream-container img{max-width:100%;max-height:100%;object-fit:contain}
-#right-panel{width:300px;background:var(--panel);border:1px solid var(--border);border-radius:8px;overflow-y:auto;display:flex;flex-direction:column;transition:width 0.3s ease,opacity 0.3s ease}
+#right-panel{width:300px;background:var(--panel);border:1px solid var(--border);border-radius:8px;display:flex;flex-direction:column;transition:width 0.3s ease,opacity 0.3s ease;max-height:100%}
 #right-panel.collapsed{width:0;opacity:0;overflow:hidden;padding:0;border:0}
 #right-toggle{width:30px;height:30px;padding:0;margin:0;background:var(--accent)}
-.panel-header{padding:12px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;font-weight:600}
-.panel-content{padding:12px;overflow-y:auto;flex:1}
+.panel-header{padding:12px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;font-weight:600;flex-shrink:0}
+.panel-content{padding:12px;overflow-y:auto;overflow-x:hidden;flex:1;min-height:0}
+.panel-content::-webkit-scrollbar{width:8px}
+.panel-content::-webkit-scrollbar-track{background:var(--panel-alt);border-radius:4px}
+.panel-content::-webkit-scrollbar-thumb{background:var(--border);border-radius:4px}
+.panel-content::-webkit-scrollbar-thumb:hover{background:var(--muted)}
 .input-group{display:flex;flex-wrap:nowrap;line-height:22px;margin:8px 0;padding:8px;border:1px solid var(--border);border-radius:8px;background:var(--panel-alt);gap:8px;align-items:center}
-.input-group>label{display:inline-block;min-width:100px;white-space:nowrap}
+.input-group>label{display:inline-block;min-width:85px;white-space:nowrap;font-size:13px}
 .input-group input,.input-group select{flex:1;min-width:0}
-.range-max,.range-min{display:inline-block;padding:0 5px;color:var(--muted);font-size:12px}
+.range-max,.range-min{display:inline-block;padding:0 2px;color:var(--muted);font-size:11px;min-width:15px;text-align:center}
+.slider-container{display:flex;gap:2px;align-items:center;flex:1;max-width:100%}
 .control-row{display:flex;gap:6px;align-items:center}
 .control-row.tight{gap:4px}
 .control-row label{min-width:60px;white-space:nowrap}
@@ -835,11 +1425,21 @@ select{border:1px solid var(--border);font-size:14px;height:22px;outline:0;borde
 .input-group>label{min-width:90px}
 }
 @media (max-width:768px){
-#top-bar{flex-direction:column;align-items:stretch}
+#top-bar{flex-direction:column;align-items:stretch;padding:8px}
 #stream-area{flex-direction:column;gap:8px;padding:8px}
 #right-panel{display:none;width:100%}
 #right-toggle{display:block}
-#right-panel.mobile-visible{display:flex;position:absolute;right:0;top:0;bottom:0;z-index:100;height:100vh;width:100%;max-width:85vw}
+#right-panel.mobile-visible{display:flex;position:fixed;right:0;top:0;bottom:0;z-index:1000;height:100vh;width:90%;max-width:320px;box-shadow:-4px 0 12px rgba(0,0,0,0.3)}
+.panel-content{padding:8px}
+.input-group{margin:6px 0;padding:6px}
+button{font-size:13px;padding:0 8px;line-height:26px}
+.section-title{margin-top:8px;margin-bottom:4px}
+}
+@media (max-width:480px){
+#right-panel.mobile-visible{width:100%;max-width:100%}
+.input-group{flex-direction:column;align-items:stretch}
+.input-group>label{min-width:auto;margin-bottom:4px}
+.slider-container{width:100%}
 }
 </style>
 </head>
@@ -882,6 +1482,9 @@ select{border:1px solid var(--border);font-size:14px;height:22px;outline:0;borde
 <button id="preset-smooth" class="preset small">Fast</button>
 <button id="preset-balanced" class="preset small">Default</button>
 <button id="preset-detail" class="preset small">High-Quality</button>
+<button id="clear_sd" class="preset small" style="margin-left:8px">Clear SD</button>
+<button id="format_sd" class="preset small">Format SD</button>
+<div id="sd_status" style="font-size:10px;font-weight:bold;padding:0 4px;"></div>
 </div>
 </div>
 <button id="right-toggle">⚙</button>
@@ -906,7 +1509,7 @@ select{border:1px solid var(--border);font-size:14px;height:22px;outline:0;borde
 <div class="section-title">Image Settings</div>
 <div class="input-group" id="brightness-group">
 <label for="brightness">Brightness</label>
-<div style="display:flex;gap:4px;align-items:center;flex:1">
+<div class="slider-container">
 <span class="range-min">-2</span>
 <input type="range" id="brightness" min="-2" max="2" value="0" class="default-action" style="flex:1">
 <span class="range-max">2</span>
@@ -914,7 +1517,7 @@ select{border:1px solid var(--border);font-size:14px;height:22px;outline:0;borde
 </div>
 <div class="input-group" id="contrast-group">
 <label for="contrast">Contrast</label>
-<div style="display:flex;gap:4px;align-items:center;flex:1">
+<div class="slider-container">
 <span class="range-min">-2</span>
 <input type="range" id="contrast" min="-2" max="2" value="0" class="default-action" style="flex:1">
 <span class="range-max">2</span>
@@ -922,7 +1525,7 @@ select{border:1px solid var(--border);font-size:14px;height:22px;outline:0;borde
 </div>
 <div class="input-group" id="saturation-group">
 <label for="saturation">Saturation</label>
-<div style="display:flex;gap:4px;align-items:center;flex:1">
+<div class="slider-container">
 <span class="range-min">-2</span>
 <input type="range" id="saturation" min="-2" max="2" value="0" class="default-action" style="flex:1">
 <span class="range-max">2</span>
@@ -989,9 +1592,9 @@ select{border:1px solid var(--border);font-size:14px;height:22px;outline:0;borde
 </div>
 <div class="input-group" id="aec_value-group">
 <label for="aec_value">Exposure</label>
-<div style="display:flex;gap:4px;align-items:center;flex:1">
+<div class="slider-container">
 <span class="range-min">0</span>
-<input type="range" id="aec_value" min="0" max="1200" value="300" class="default-action" style="flex:1">
+<input type="range" id="aec_value" min="0" max="1200" value="300" class="default-action">
 <span class="range-max">1200</span>
 </div>
 </div>
@@ -1004,7 +1607,7 @@ select{border:1px solid var(--border);font-size:14px;height:22px;outline:0;borde
 </div>
 <div class="input-group" id="gainceiling-group">
 <label for="gainceiling">Gain Ceiling</label>
-<div style="display:flex;gap:4px;align-items:center;flex:1">
+<div class="slider-container">
 <span class="range-min">2x</span>
 <input type="range" id="gainceiling" min="0" max="6" value="0" class="default-action" style="flex:1">
 <span class="range-max">128x</span>
@@ -1020,9 +1623,9 @@ select{border:1px solid var(--border);font-size:14px;height:22px;outline:0;borde
 </div>
 <div class="input-group" id="ae_level-group">
 <label for="ae_level">AE Level</label>
-<div style="display:flex;gap:4px;align-items:center;flex:1">
+<div class="slider-container">
 <span class="range-min">-2</span>
-<input type="range" id="ae_level" min="-2" max="2" value="0" class="default-action" style="flex:1">
+<input type="range" id="ae_level" min="-2" max="2" value="0" class="default-action">
 <span class="range-max">2</span>
 </div>
 </div>
@@ -1068,6 +1671,14 @@ select{border:1px solid var(--border);font-size:14px;height:22px;outline:0;borde
 <label class="slider" for="colorbar"></label>
 </div>
 </div>
+<div class="section-title">Flash LED</div>
+<div class="input-group" id="flash_master-group">
+<label for="flash_master">Manual Flashlight</label>
+<div class="switch">
+<input id="flash_master" type="checkbox">
+<label class="slider" for="flash_master"></label>
+</div>
+</div>
 </nav>
 </div>
 </div>
@@ -1077,6 +1688,7 @@ select{border:1px solid var(--border);font-size:14px;height:22px;outline:0;borde
 <script>
 document.addEventListener('DOMContentLoaded',function(){
 const baseHost=document.location.origin;
+let flashMotionState=true; // preserve motion indicator state
 const view=document.getElementById('stream');
 const streamContainer=document.getElementById('stream-container');
 const stillButton=document.getElementById('get-still');
@@ -1157,6 +1769,12 @@ updateValue(el,state[el.id],false);
 if(state.motion_enabled!==undefined){
 document.getElementById('motion_enabled').checked=state.motion_enabled;
 }
+if(state.flash_manual!==undefined){
+document.getElementById('flash_master').checked=state.flash_manual;
+}
+if(state.flash_motion!==undefined){
+flashMotionState=!!state.flash_motion;
+}
 // Display device name and chip ID
 if(state.device_name){
 document.getElementById('device-name').textContent=state.device_name;
@@ -1176,12 +1794,37 @@ updateValue(document.getElementById('quality'),state.quality,false);
 if(state.camera_ready){
 setPill('status-ok','Ready');
 } else {
+// Show "Initializing..." for first 10 seconds, then "Camera not ready"
+const uptime = state.uptime || 0;
+if (uptime < 10) {
+setPill('status-warn','Initializing...');
+} else {
 setPill('status-warn','Camera not ready');
+}
 }
 setConnectivity(state.wifi_rssi,state.mqtt_connected);
 }).catch(err=>{
 console.error('Status load failed',err);
 });
+// Poll status every 2 seconds to update camera ready status and connectivity
+setInterval(()=>{
+fetch(`${baseHost}/status`).then(response=>response.json()).then(state=>{
+if(state.camera_ready){
+setPill('status-ok','Ready');
+} else {
+// Show "Initializing..." for first 10 seconds, then "Camera not ready"
+const uptime = state.uptime || 0;
+if (uptime < 10) {
+setPill('status-warn','Initializing...');
+} else {
+setPill('status-warn','Camera not ready');
+}
+}
+setConnectivity(state.wifi_rssi,state.mqtt_connected);
+}).catch(err=>{
+console.error('Status poll failed',err);
+});
+},2000);
 // Stream controls
 const stopStream=()=>{
 view.src='';
@@ -1231,12 +1874,81 @@ motionToggle.onchange=()=>{
 const enabled=motionToggle.checked?1:0;
 fetch(`${baseHost}/motion-control?enabled=${enabled}`).then(response=>response.json()).catch(err=>console.error('Motion control failed:',err));
 };
+// Flash toggle (manual flashlight on/off)
+const flashMasterToggle=document.getElementById('flash_master');
+flashMasterToggle.onchange=()=>{
+const manual=flashMasterToggle.checked?1:0;
+console.log(`[FLASH] Manual toggle changed: manual=${manual}`);
+fetch(`${baseHost}/flash-control?manual=${manual}`).then(response=>response.json()).then(data=>{console.log('[FLASH] Server response:',data);}).catch(err=>console.error('[FLASH] Control failed:',err));
+};
 // Presets
 const setAndPush=(id,val)=>{
 const el=document.getElementById(id);
 if(!el) return;
 updateValue(el,val,true);
 };
+
+// SD clear button
+const clearSdBtn=document.getElementById('clear_sd');
+const formatSdBtn=document.getElementById('format_sd');
+const sdStatus=document.getElementById('sd_status');
+if(clearSdBtn){
+clearSdBtn.onclick=()=>{
+if(!confirm('Delete all captures on SD card?')) return;
+clearSdBtn.disabled=true;
+sdStatus.textContent='Clearing...';
+sdStatus.style.color='#ffa500'; // Orange
+fetch(`${baseHost}/captures/clear`).then(r=>r.json()).then(res=>{
+if(res.status==='cleared'){
+sdStatus.textContent='✓ Cleared successfully';
+sdStatus.style.color='#4CAF50'; // Green
+setTimeout(()=>{sdStatus.textContent='';},3000);
+} else if(res.status==='sd_not_ready'){
+sdStatus.textContent='✗ SD card not ready';
+sdStatus.style.color='#f44336'; // Red
+setTimeout(()=>{sdStatus.textContent='';},5000);
+} else {
+sdStatus.textContent='✗ Error: '+res.status;
+sdStatus.style.color='#f44336'; // Red
+setTimeout(()=>{sdStatus.textContent='';},5000);
+}
+}).catch(err=>{
+console.error('SD clear failed:',err);
+sdStatus.textContent='✗ Network error';
+sdStatus.style.color='#f44336'; // Red
+setTimeout(()=>{sdStatus.textContent='';},5000);
+}).finally(()=>{
+clearSdBtn.disabled=false;
+});
+};
+}
+if(formatSdBtn){
+formatSdBtn.onclick=async()=>{
+if(!confirm('⚠️ WARNING: FORMAT WILL REBOOT THE DEVICE!\n\nThis will:\n• REBOOT the camera immediately\n• ERASE ALL DATA on the SD card\n• Take about 10 seconds to complete\n\nContinue with format?')) return;
+formatSdBtn.disabled=true;
+clearSdBtn.disabled=true;
+sdStatus.textContent='⟳ Rebooting to format...';
+sdStatus.style.color='#ffa500';
+try{
+const formData=new FormData();
+formData.append('confirm','yes');
+const res=await(await fetch(`${baseHost}/sd/format`,{method:'POST',body:formData})).json();
+if(res.status==='rebooting_to_format'){
+sdStatus.textContent='⟳ Device rebooting - please wait...';
+setTimeout(()=>{location.reload();},10000);
+} else {
+sdStatus.textContent='✗ Format failed: '+res.status;
+sdStatus.style.color='#f44336';
+formatSdBtn.disabled=false;
+clearSdBtn.disabled=false;
+}
+}catch(err){
+console.error('Format error:',err);
+sdStatus.textContent='⟳ Device rebooting (connection lost)...';
+setTimeout(()=>{location.reload();},10000);
+}
+};
+}
 // Fast: Low res, high compression, minimal latency
 document.getElementById('preset-smooth').onclick=()=>{
 setAndPush('framesize','5');
@@ -1266,11 +1978,31 @@ setAndPush('gainceiling','3');
 </body>
 </html>
 )=====";
-    request->send(200, "text/html", html);
+    AsyncWebServerResponse *response = request->beginResponse(200, "text/html", html);
+    response->addHeader("Cache-Control", "no-cache, no-store, must-revalidate");
+    response->addHeader("Pragma", "no-cache");
+    response->addHeader("Expires", "0");
+    request->send(response);
 }
 
 void handleCapture(AsyncWebServerRequest *request) {
+    Serial.printf("[Capture] Starting capture, flashlight=%s\n", 
+                  flashManualOn ? "ON" : "OFF");
+    
+    // Always flash on capture (save current manual state)
+    bool wasManualOn = flashManualOn;
+    if (!wasManualOn) {
+        digitalWrite(FLASH_PIN, HIGH);
+        delay(100);  // Allow flash to reach brightness
+    }
+
     camera_fb_t * fb = capturePhoto();
+    
+    // Restore flash state after capture
+    if (!wasManualOn) {
+        digitalWrite(FLASH_PIN, LOW);
+    }
+    
     if (!fb) {
         cameraErrors++;
         request->send(500, "text/plain", "Camera capture failed");
@@ -1279,15 +2011,43 @@ void handleCapture(AsyncWebServerRequest *request) {
 
     captureCount++;
 
-    // Send the image directly from the buffer
-    // The response will take ownership of a copy of the data
-    AsyncWebServerResponse *response = request->beginResponse_P(200, "image/jpeg", fb->buf, fb->len);
+    // Copy the frame so we can safely return the original buffer immediately
+    uint8_t *copyBuf = (uint8_t*)malloc(fb->len);
+    size_t copyLen = fb->len;
+    if (!copyBuf) {
+        cameraErrors++;
+        request->send(500, "text/plain", "Memory allocation failed");
+        returnFrameBuffer(fb);
+        return;
+    }
+    memcpy(copyBuf, fb->buf, copyLen);
+
+    // Return the frame buffer to the camera driver quickly to avoid corruption
+    returnFrameBuffer(fb);
+
+    // Save to SD card if available
+    if (sdReady) {
+        char path[64];
+        snprintf(path, sizeof(path), "%s/%lu_%lu.jpg", SD_CAPTURE_DIR, millis(), captureCount);
+        File file = SD_MMC.open(path, "w");
+        if (file) {
+            file.write(copyBuf, copyLen);
+            file.close();
+            Serial.printf("[SD] Saved capture: %s (%u bytes)\n", path, (unsigned int)copyLen);
+        } else {
+            Serial.println("[SD] Failed to write capture");
+        }
+    }
+
+    // LED remains in manual state (not controlled by capture)
+
+    AsyncWebServerResponse *response = request->beginResponse_P(200, "image/jpeg", copyBuf, copyLen);
     response->addHeader("Content-Disposition", "inline; filename=capture.jpg");
     response->addHeader("Access-Control-Allow-Origin", "*");
+    request->onDisconnect([copyBuf]() {
+        free(copyBuf);
+    });
     request->send(response);
-
-    // Now it's safe to return the frame buffer
-    returnFrameBuffer(fb);
 }
 
 // MJPEG streaming using chunked response
@@ -1530,4 +2290,78 @@ void handleMotionControl(AsyncWebServerRequest *request) {
     String output;
     serializeJson(doc, output);
     request->send(200, "application/json", output);
+}
+
+void handleFlashControl(AsyncWebServerRequest *request) {
+    if (!request->hasParam("manual")) {
+        request->send(400, "text/plain", "Missing 'manual' parameter");
+        return;
+    }
+
+    String manualParam = request->getParam("manual")->value();
+    
+    bool newManual = (manualParam == "1" || manualParam.equalsIgnoreCase("true"));
+    
+    flashManualOn = newManual;
+    
+    // Re-initialize GPIO to ensure it's in OUTPUT mode
+    pinMode(FLASH_PIN, OUTPUT);
+    digitalWrite(FLASH_PIN, flashManualOn ? HIGH : LOW);
+    
+    Serial.printf("[FLASH] Manual flashlight=%s (GPIO%d)\n",
+                  flashManualOn ? "ON" : "OFF", FLASH_PIN);
+    
+    JsonDocument doc;
+    doc["flash_manual"] = flashManualOn;
+    doc["flash_pin"] = FLASH_PIN;
+    doc["status"] = "ok";
+    
+    String output;
+    serializeJson(doc, output);
+    request->send(200, "application/json", output);
+}
+
+void handleWiFiReset(AsyncWebServerRequest *request) {
+    // Requires secret token for security
+    if (!request->hasParam("token")) {
+        request->send(401, "application/json", "{\"error\":\"Missing token parameter\"}");
+        return;
+    }
+
+    String token = request->getParam("token")->value();
+    
+    #ifdef WIFI_RESET_TOKEN
+    if (token != WIFI_RESET_TOKEN) {
+        Serial.println("[WiFi Reset] Invalid token attempt");
+        request->send(403, "application/json", "{\"error\":\"Invalid token\"}");
+        return;
+    }
+    #else
+    // No token defined - reject all requests
+    request->send(503, "application/json", "{\"error\":\"WiFi reset not configured - add WIFI_RESET_TOKEN to secrets.h\"}");
+    return;
+    #endif
+
+    Serial.println("[WiFi Reset] Valid token received, clearing credentials...");
+    
+    // Log event before reset
+    logEventToMQTT("wifi_reset_requested", "warning");
+    
+    // Clear saved WiFi credentials
+    wifiManager.resetSettings();
+    
+    // Set flag to enter config portal on next boot
+    configPortalReason = "wifi_reset";
+    
+    JsonDocument doc;
+    doc["status"] = "ok";
+    doc["message"] = "WiFi credentials cleared. Device will restart into config portal.";
+    
+    String output;
+    serializeJson(doc, output);
+    request->send(200, "application/json", output);
+    
+    // Restart after brief delay
+    delay(1000);
+    ESP.restart();
 }

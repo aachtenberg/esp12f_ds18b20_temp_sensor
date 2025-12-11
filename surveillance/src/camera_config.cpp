@@ -42,12 +42,12 @@ camera_config_t getCameraConfig() {
         // AI-Thinker ESP32-CAM: optimize for quality + speed
         if (psramFound()) {
             config.frame_size = FRAMESIZE_VGA;  // 640x480 - decent resolution
-            config.jpeg_quality = 8;            // Higher quality (lower value = better quality)
+            config.jpeg_quality = 10;           // Balance between quality and responsiveness
             config.fb_count = 2;                // double buffering for smoother stream
             Serial.println("PSRAM found (ESP32-CAM) - using VGA quality + speed profile");
         } else {
             config.frame_size = FRAMESIZE_HVGA; // 480x320 when PSRAM missing (better than QVGA)
-            config.jpeg_quality = 10;
+            config.jpeg_quality = 12;
             config.fb_count = 1;
             Serial.println("PSRAM not found (ESP32-CAM) - using HVGA quality fallback");
         }
