@@ -26,17 +26,17 @@ camera_config_t getCameraConfig() {
 
     // Per-board tuning: each sensor has different JPEG encoder characteristics
     #if defined(CAMERA_MODEL_ESP32S3_EYE)
-        // S3 board with OV3660: Needs higher quality value for stable JPEG encoding
+        // S3 board with OV3660: Optimized settings for high performance streaming
         if (psramFound()) {
-            config.frame_size = FRAMESIZE_VGA;   // 640x480
-            config.jpeg_quality = 20;            // OV3660: Higher quality (more compression) for stability
-            config.fb_count = CAMERA_FB_COUNT;
-            Serial.println("PSRAM found (S3/OV3660) - using VGA@Q20 for stable JPEG");
+            config.frame_size = FRAMESIZE_SVGA;  // 800x600 - documented working resolution
+            config.jpeg_quality = 12;            // Optimal quality/speed balance per docs
+            config.fb_count = 2;                 // Double buffering for smooth streaming
+            Serial.println("PSRAM found (S3/OV3660) - using SVGA@Q12 for streaming");
         } else {
-            config.frame_size = FRAMESIZE_HVGA;  // 480x320
-            config.jpeg_quality = 22;
+            config.frame_size = FRAMESIZE_VGA;   // 640x480 fallback without PSRAM
+            config.jpeg_quality = 15;
             config.fb_count = 1;
-            Serial.println("PSRAM not found (S3/OV3660) - using reduced settings");
+            Serial.println("PSRAM not found (S3/OV3660) - using VGA fallback");
         }
     #else
         // ESP32-CAM with OV2640: More forgiving JPEG encoder, can use lower quality for responsiveness
@@ -120,6 +120,28 @@ camera_fb_t* capturePhoto() {
         Serial.println("Camera capture failed");
         return NULL;
     }
+    
+    // Validate JPEG frame: should start with 0xFFD8 and end with 0xFFD9
+    if (fb->len < 4) {
+        Serial.printf("Frame too small: %zu bytes\n", fb->len);
+        esp_camera_fb_return(fb);
+        return NULL;
+    }
+    
+    uint8_t* buf = (uint8_t*)fb->buf;
+    if (buf[0] != 0xFF || buf[1] != 0xD8) {
+        Serial.printf("Invalid JPEG header: %02X %02X (expected FFD8)\n", buf[0], buf[1]);
+        esp_camera_fb_return(fb);
+        return NULL;
+    }
+    
+    if (buf[fb->len-2] != 0xFF || buf[fb->len-1] != 0xD9) {
+        Serial.printf("Invalid JPEG footer: %02X %02X (expected FFD9)\n", 
+                      buf[fb->len-2], buf[fb->len-1]);
+        esp_camera_fb_return(fb);
+        return NULL;
+    }
+    
     // Give camera sensor time to settle between frames (prevents tearing)
     delayMicroseconds(100);
     return fb;
