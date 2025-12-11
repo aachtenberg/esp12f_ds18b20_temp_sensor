@@ -73,20 +73,22 @@ bool initCamera() {
     sensor_t * s = esp_camera_sensor_get();
     if (s != NULL) {
         // Sensor ID detection for specific optimizations
-        if (s->id.PID == OV3660_PID) {
+        bool isOV3660 = (s->id.PID == OV3660_PID);
+        bool isOV2640 = (s->id.PID == OV2640_PID);
+        
+        if (isOV3660) {
             Serial.println("OV3660 detected - applying optimizations");
             s->set_vflip(s, 1);        // Flip vertically
             s->set_brightness(s, 1);   // Slightly brighter
             s->set_saturation(s, -2);  // Lower saturation for OV3660
-        } else if (s->id.PID == OV2640_PID) {
+        } else if (isOV2640) {
             Serial.println("OV2640 detected - applying optimizations");
-            // Standard OV2640 settings (most common for ESP32-S3)
         }
 
         // Sensor adjustments optimized for quality + speed
-        s->set_brightness(s, 0);     // -2 to 2 (neutral)
+        s->set_brightness(s, 0);     // -2 to 2 (neutral) - override OV3660 custom if needed
         s->set_contrast(s, 1);       // -2 to 2 (slight boost for clarity)
-        s->set_saturation(s, 0);     // -2 to 2 (natural colors)
+        s->set_saturation(s, 0);     // -2 to 2 (natural colors) - overrides OV3660 -2
         s->set_special_effect(s, 0); // 0 to 6 (0 - No Effect)
         s->set_whitebal(s, 1);       // 0 = disable , 1 = enable
         s->set_awb_gain(s, 1);       // 0 = disable , 1 = enable
@@ -103,7 +105,7 @@ bool initCamera() {
         s->set_raw_gma(s, 1);        // 0 = disable , 1 = enable
         s->set_lenc(s, 1);           // 0 = disable , 1 = enable (enabled for quality)
         s->set_hmirror(s, 0);        // 0 = disable , 1 = enable
-        s->set_vflip(s, 0);          // 0 = disable , 1 = enable
+        s->set_vflip(s, isOV3660 ? 1 : 0);  // Keep vflip for OV3660, disable for others
         s->set_dcw(s, 1);            // 0 = disable , 1 = enable
         s->set_colorbar(s, 0);       // 0 = disable , 1 = enable
     }
@@ -118,6 +120,8 @@ camera_fb_t* capturePhoto() {
         Serial.println("Camera capture failed");
         return NULL;
     }
+    // Give camera sensor time to settle between frames (prevents tearing)
+    delayMicroseconds(100);
     return fb;
 }
 
