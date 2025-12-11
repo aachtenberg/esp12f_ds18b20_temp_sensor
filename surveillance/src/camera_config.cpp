@@ -26,15 +26,15 @@ camera_config_t getCameraConfig() {
 
     // Per-board tuning: keep S3 high-res, bias ESP32-CAM for speed/latency
     #if defined(CAMERA_MODEL_ESP32S3_EYE)
-        // S3 board: keep higher res the same as before
+        // S3 board with OV3660: SVGA can cause JPEG decode errors, use VGA instead
         if (psramFound()) {
-            config.frame_size = FRAMESIZE_SVGA;  // 800x600 - high quality streaming
-            config.jpeg_quality = 12;             // 0-63 lower means higher quality (12 for speed at high res)
+            config.frame_size = FRAMESIZE_VGA;   // 640x480 - more stable than SVGA with OV3660
+            config.jpeg_quality = 15;            // Higher quality value (more compression, more stable)
             config.fb_count = CAMERA_FB_COUNT;
-            Serial.println("PSRAM found (S3) - using SVGA streaming settings");
+            Serial.println("PSRAM found (S3) - using VGA settings with OV3660");
         } else {
             config.frame_size = FRAMESIZE_HVGA;  // 480x320
-            config.jpeg_quality = 15;
+            config.jpeg_quality = 18;
             config.fb_count = 1;
             Serial.println("PSRAM not found (S3) - using reduced settings");
         }
