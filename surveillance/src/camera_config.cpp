@@ -24,32 +24,32 @@ camera_config_t getCameraConfig() {
     config.xclk_freq_hz = CAMERA_XCLK_FREQ;
     config.pixel_format = PIXFORMAT_JPEG;
 
-    // Per-board tuning: keep S3 high-res, bias ESP32-CAM for speed/latency
+    // Per-board tuning: each sensor has different JPEG encoder characteristics
     #if defined(CAMERA_MODEL_ESP32S3_EYE)
-        // S3 board with OV3660: SVGA can cause JPEG decode errors, use VGA instead
+        // S3 board with OV3660: Needs higher quality value for stable JPEG encoding
         if (psramFound()) {
-            config.frame_size = FRAMESIZE_VGA;   // 640x480 - more stable than SVGA with OV3660
-            config.jpeg_quality = 15;            // Higher quality value (more compression, more stable)
+            config.frame_size = FRAMESIZE_VGA;   // 640x480
+            config.jpeg_quality = 20;            // OV3660: Higher quality (more compression) for stability
             config.fb_count = CAMERA_FB_COUNT;
-            Serial.println("PSRAM found (S3) - using VGA settings with OV3660");
+            Serial.println("PSRAM found (S3/OV3660) - using VGA@Q20 for stable JPEG");
         } else {
             config.frame_size = FRAMESIZE_HVGA;  // 480x320
-            config.jpeg_quality = 18;
+            config.jpeg_quality = 22;
             config.fb_count = 1;
-            Serial.println("PSRAM not found (S3) - using reduced settings");
+            Serial.println("PSRAM not found (S3/OV3660) - using reduced settings");
         }
     #else
-        // AI-Thinker ESP32-CAM: optimize for quality + speed
+        // ESP32-CAM with OV2640: More forgiving JPEG encoder, can use lower quality for responsiveness
         if (psramFound()) {
             config.frame_size = FRAMESIZE_VGA;  // 640x480 - decent resolution
-            config.jpeg_quality = 10;           // Balance between quality and responsiveness
+            config.jpeg_quality = 10;           // OV2640: Lower quality (less compression) = faster, still stable
             config.fb_count = 2;                // double buffering for smoother stream
-            Serial.println("PSRAM found (ESP32-CAM) - using VGA quality + speed profile");
+            Serial.println("PSRAM found (ESP32-CAM/OV2640) - using VGA@Q10 for speed");
         } else {
             config.frame_size = FRAMESIZE_HVGA; // 480x320 when PSRAM missing (better than QVGA)
             config.jpeg_quality = 12;
             config.fb_count = 1;
-            Serial.println("PSRAM not found (ESP32-CAM) - using HVGA quality fallback");
+            Serial.println("PSRAM not found (ESP32-CAM/OV2640) - using HVGA quality fallback");
         }
     #endif
 
