@@ -10,12 +10,25 @@ ESP32-CAM surveillance system with MQTT integration, motion detection, and web i
   - 4MB PSRAM
   - VGA resolution @ 640x480
   - Proven stable for production use
+  - Flash LED on GPIO 4 for capture illumination
 
-### 🚧 Work in Progress
+### 🚧 In Testing
 - **ESP32-S3 WROOM Dev Kit**
-  - Higher resolution support planned
-  - Advanced features under development
-  - Not recommended for production yet
+  - OV3660 camera module (higher resolution)
+  - SVGA resolution @ 800x600
+  - Requires stabilized 10 MHz XCLK
+  - No built-in flash LED
+  - Still being optimized for production use
+
+## Camera Performance Notes
+
+Both boards use **10 MHz XCLK clock** (stabilized from earlier 25 MHz) to ensure reliable frame capture across different environmental conditions. This matches the working Freenove reference implementation.
+
+**Board-Specific Camera Settings:**
+- **ESP32-CAM**: OV2640 encoder is forgiving, uses default sensor settings
+- **ESP32-S3**: OV3660 requires specific configuration (vflip, brightness, saturation)
+
+See `camera_config.cpp` and `PERFORMANCE_OPTIMIZATIONS.md` for detailed tuning.
 
 ## Features
 
@@ -24,11 +37,12 @@ ESP32-CAM surveillance system with MQTT integration, motion detection, and web i
 - 🌐 Responsive web interface (desktop/tablet/mobile)
 - 📡 MQTT integration for remote monitoring
 - 💾 SD card capture storage with graceful shutdown
-- 🔦 Configurable flash LED (manual/capture modes)
+- 🔦 Configurable flash LED (manual/capture modes - board-dependent)
 - 🔄 OTA firmware updates
 - 📱 WiFi configuration portal with triple-reset detection
 - 🛡️ Crash loop recovery and WiFi fallback AP
 - 💾 PSRAM support for smooth streaming
+- 📊 Board-specific optimizations (ESP32-CAM vs ESP32-S3)
 
 ### ESP32-CAM Pin Configuration (AI-Thinker)
 
@@ -44,8 +58,8 @@ ESP32-CAM surveillance system with MQTT integration, motion detection, and web i
 - PCLK: GPIO 22
 
 **Additional Pins:**
-- Flash LED: GPIO 4
-- SD Card: 1-bit mode (CMD, CLK, D0)
+- Flash LED: GPIO 4 (built-in on AI-Thinker board)
+- SD Card: 1-bit mode (CLK=39, CMD=38, D0=40) - default pins for ESP32-S3
 
 ### ESP32-S3 Pin Configuration (Dev Kit - WIP)
 
@@ -119,9 +133,10 @@ Access via `http://[device-ip]` after WiFi connection:
 - **Resolution**: 96x96 pixels (downsampled from VGA)
 - **Thresholds**: 
   - Pixel difference: 25 (0-255 scale)
-  - Changed pixels: 25 minimum to trigger
+  - Changed blocks: 25 blocks minimum to trigger
 - **Check interval**: Every 3 seconds
 - **Flash indicator**: Disabled by default (too bright for continuous use)
+- **Storage**: Detected motion images saved to SD card automatically (if mounted)
 
 ### MQTT Topics
 
@@ -140,6 +155,21 @@ Access via `http://[device-ip]` after WiFi connection:
 {"command": "status"}     // Publish device status
 {"command": "restart"}    // Restart device
 ```
+
+### SD Card Storage
+
+When an SD card is mounted, the device automatically saves captures:
+- **Motion detection images**: Saved with `motion` tag and timestamp
+- **Manual captures**: Saved with `capture` tag and timestamp
+- **Full-frame images**: Saved with `full` tag (from `captureAndPublishWithImage()`)
+- **Storage format**: JPEG files in `/captures` directory
+- **Web UI feedback**: Capture endpoint returns `X-SD-Saved` header indicating success/failure
+
+**Configuration:**
+- Directory: `/captures` (automatically created on SD card)
+- File naming: `{timestamp}_{reason}.jpg`
+- Graceful unmount: Device properly unmounts SD before reboot to prevent corruption
+- Fallback: If SD card unavailable, captures still work and stream normally
 
 ### Configuration Options
 
@@ -177,10 +207,11 @@ Edit `include/device_config.h` to customize:
 - Review serial output for connection error codes
 
 ### SD Card Issues
-- **Mount failed**: Use quality SD card (Class 10 or better)
-- **Corruption**: Device uses graceful shutdown to prevent corruption
-- **Format**: Use web UI "Format SD" button (device will reboot)
-- **Speed**: 1-bit mode at 19 MHz provides best compatibility
+- **Mount failed**: Ensure SD card is properly inserted and contacts are clean
+- **Not saving**: Check SD card has write permissions and free space
+- **Slow saves**: Normal - JPEG write speed depends on card class (use Class 10+)
+- **Corruption**: Device uses graceful shutdown; wait for system to fully boot before power loss
+- **Check status**: `/status` endpoint shows `sd_ready` and card size in MB
 
 ### OTA Update Failed
 - Ensure stable WiFi connection (strong signal)
@@ -246,11 +277,11 @@ surveillance/
 6. Trigger if changed pixels ≥ minimum
 
 **SD Card Management:**
-- Low-level SDMMC API for stability
-- 1-bit mode (CLK, CMD, D0 only)
-- 19 MHz clock speed (under 20 MHz limit)
-- 400 kHz during initialization
-- Graceful unmount before reboot
+- Simple mount using `SD_MMC.begin()` in 1-bit mode
+- Automatic `/captures` directory creation on first mount
+- Saves JPEG frames with timestamp and reason tag
+- Graceful unmount before reboot to prevent corruption
+- Web UI provides feedback on save status via HTTP headers
 
 **Recovery Systems:**
 - Triple-reset detection (within 2 seconds)

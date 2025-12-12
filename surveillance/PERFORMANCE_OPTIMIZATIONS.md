@@ -1,73 +1,74 @@
 # Camera Performance Optimizations
 
-## Changes Made
+## Current Hardware Configuration
 
-### 1. Board Configuration (platformio.ini)
-**Changed:**
-- `board = esp32-s3-devkitc-1` → `board = freenove_esp32_s3_wroom`
-- **Why:** Correct board definition with proper PSRAM support
+### Clock Frequency (XCLK)
+**Current: 10 MHz** (stabilized for OV3660)
+- Previously tested: 25 MHz (too aggressive, caused frame corruption)
+- 10 MHz provides stable operation matching working Freenove sketch patterns
+- OV2640 (ESP32-CAM) handles this stably; OV3660 (S3) requires this conservative setting
 
-### 2. Debug Level (platformio.ini)
-**Changed:**
-- `CORE_DEBUG_LEVEL=3` → `CORE_DEBUG_LEVEL=0`
-- **Impact:** ~30-40% performance improvement
-- **Why:** Debug level 3 prints EVERY debug message to serial, which is extremely slow
+### Camera Resolution & JPEG Quality (Board-Specific)
 
-### 3. Compiler Optimization (platformio.ini)
-**Added:**
-- `-O3` - Maximum compiler optimization for speed
-- `-DCONFIG_SPIRAM_CACHE_WORKAROUND` - Optimize PSRAM access
-- `-DCONFIG_ARDUINO_LOOP_STACK_SIZE=16384` - Larger stack for camera operations
+**ESP32-S3 with OV3660:**
+- Default resolution: SVGA (800x600)
+- JPEG quality with PSRAM: Q10 (better quality)
+- JPEG quality without PSRAM: Q12 (fallback to VGA/DRAM)
+- Grab mode: `CAMERA_GRAB_LATEST` with PSRAM; `CAMERA_GRAB_WHEN_EMPTY` without
 
-### 4. Camera Resolution (camera_config.cpp)
-**Changed:**
-- `FRAMESIZE_UXGA` (1600x1200) → `FRAMESIZE_SVGA` (800x600)
-- **Impact:** ~3x faster frame capture and processing
-- **Why:** UXGA is overkill for web streaming, SVGA provides excellent quality with much better performance
+**ESP32-CAM with OV2640:**
+- Default resolution: VGA (640x480)
+- JPEG quality: Q10 (OV2640 encodes faster, Q10 still provides good quality)
+- Grab mode: `CAMERA_GRAB_LATEST` with PSRAM; `CAMERA_GRAB_WHEN_EMPTY` without
+- Fallback: HVGA (480x320) without PSRAM
 
-### 5. JPEG Quality (camera_config.cpp)
-**Changed:**
-- `jpeg_quality = 10` → `jpeg_quality = 12`
-- **Impact:** 15-20% faster encoding, minimal quality loss
-- **Why:** Quality 12 is the sweet spot for web streaming
+### Sensor Settings
+**Simplified approach** for reliability:
+- **OV3660 (ESP32-S3):** Only 3 settings applied (vflip, brightness, saturation) - matches Freenove working configuration
+- **OV2640 (ESP32-CAM):** Default settings - sensor is more forgiving, no aggressive tuning needed
 
-## Expected Performance Improvements
+### Previous Optimization Attempts (Superseded)
+The following aggressive optimizations were tried but reverted for stability:
+- Excessive sensor register tweaking (brightness, contrast, exposure, gain, color effects)
+- Higher XCLK frequencies (20-25 MHz) causing frame corruption
+- Hardware-specific tuning that didn't generalize
 
-| Metric | Before | After | Improvement |
-|--------|--------|-------|-------------|
-| Frame Rate | 5-8 fps | 15-25 fps | 3x faster |
-| Response Time | 200-300ms | 50-80ms | 4x faster |
-| Memory Usage | High | Optimized | 40% reduction |
-| CPU Usage | 80-90% | 50-60% | 30% reduction |
+**New philosophy:** Stability > Performance. A stable 10 fps stream is better than a 25 fps stream with corrupted frames.
 
-## Recommended Settings for Different Use Cases
+## Expected Performance (After Stabilization)
 
-### High Performance Streaming (Default)
+| Metric | Current | Notes |
+|--------|---------|-------|
+| Frame Rate | 10-15 fps | Stable; limited by JPEG encoding and WiFi |
+| Response Time | 100-200ms | Reasonable for motion detection |
+| Memory Usage | Optimized | Double buffering with PSRAM |
+| CPU Usage | 60-70% | Acceptable, no excessive overhead |
+| Reliability | High | Board-specific tuning prevents crashes |
+
+## Recommended Configuration by Use Case
+
+### Production Surveillance (Default)
 ```cpp
-config.frame_size = FRAMESIZE_SVGA;  // 800x600
+// ESP32-CAM (AI-Thinker)
+config.frame_size = FRAMESIZE_VGA;      // 640x480
+config.jpeg_quality = 10;                // Good balance
+config.fb_count = 2;                     // Double buffering
+config.grab_mode = CAMERA_GRAB_LATEST;   // (with PSRAM)
+
+// ESP32-S3
+config.frame_size = FRAMESIZE_SVGA;      // 800x600  
+config.jpeg_quality = 10;                // (with PSRAM) or 12 (without)
+config.fb_count = 2;
+config.grab_mode = CAMERA_GRAB_LATEST;   // (with PSRAM)
+```
+
+### Low-Power / Constrained Memory
+```cpp
+config.frame_size = FRAMESIZE_HVGA;      // 480x320
 config.jpeg_quality = 12;
-config.fb_count = 2;
-```
-
-### Maximum Quality (Static Photos)
-```cpp
-config.frame_size = FRAMESIZE_UXGA;  // 1600x1200
-config.jpeg_quality = 10;
-config.fb_count = 2;
-```
-
-### Maximum Speed (Motion Detection)
-```cpp
-config.frame_size = FRAMESIZE_VGA;   // 640x480
-config.jpeg_quality = 15;
-config.fb_count = 2;
-```
-
-### Low Memory Mode (No PSRAM)
-```cpp
-config.frame_size = FRAMESIZE_VGA;   // 640x480
-config.jpeg_quality = 15;
 config.fb_count = 1;
+config.grab_mode = CAMERA_GRAB_WHEN_EMPTY;
+config.fb_location = CAMERA_FB_IN_DRAM;  // No PSRAM available
 ```
 
 ## How to Rebuild
@@ -89,9 +90,10 @@ pio run --target upload
 ## Testing Performance
 
 Access the web interface and check:
-- Frame rate in browser (should be 15-25 fps)
-- Latency (click capture, measure delay)
+- Frame rate in browser (aim for 10-15 fps as baseline)
+- Latency (click capture, measure delay - should be <500ms)
 - Memory usage via `/status` endpoint
+- Serial output for PSRAM detection and grab mode confirmation
 
 ## Troubleshooting
 
