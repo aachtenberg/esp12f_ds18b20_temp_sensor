@@ -23,38 +23,46 @@ camera_config_t getCameraConfig() {
     config.pin_reset = RESET_GPIO_NUM;
     config.xclk_freq_hz = CAMERA_XCLK_FREQ;
     config.pixel_format = PIXFORMAT_JPEG;
+    config.grab_mode = CAMERA_GRAB_WHEN_EMPTY;  // Initial mode before PSRAM check
 
-    // Per-board tuning: each sensor has different JPEG encoder characteristics
+    // Per-board tuning: match working Freenove sketch pattern
     #if defined(CAMERA_MODEL_ESP32S3_EYE)
-        // S3 board with OV3660: Optimized settings for high performance streaming
+        // S3 board with OV3660: Match working Freenove configuration
+        config.frame_size = FRAMESIZE_SVGA;  // 800x600
+        config.jpeg_quality = 12;
+        config.fb_count = 2;
+        
         if (psramFound()) {
-            config.frame_size = FRAMESIZE_SVGA;  // 800x600 - documented working resolution
-            config.jpeg_quality = 12;            // Optimal quality/speed balance per docs
-            config.fb_count = 2;                 // Double buffering for smooth streaming
-            Serial.println("PSRAM found (S3/OV3660) - using SVGA@Q12 for streaming");
+            config.jpeg_quality = 10;            // Better quality with PSRAM (matches Freenove)
+            config.fb_count = 2;
+            config.grab_mode = CAMERA_GRAB_LATEST;  // Switch to LATEST with PSRAM
+            Serial.println("PSRAM found (S3/OV3660) - using SVGA@Q10 with GRAB_LATEST");
         } else {
             config.frame_size = FRAMESIZE_VGA;   // 640x480 fallback without PSRAM
-            config.jpeg_quality = 15;
+            config.jpeg_quality = 12;
             config.fb_count = 1;
+            config.fb_location = CAMERA_FB_IN_DRAM;
             Serial.println("PSRAM not found (S3/OV3660) - using VGA fallback");
         }
     #else
         // ESP32-CAM with OV2640: More forgiving JPEG encoder, can use lower quality for responsiveness
+        config.frame_size = FRAMESIZE_VGA;  // 640x480 - decent resolution
+        config.jpeg_quality = 10;           // OV2640: Lower quality (less compression) = faster, still stable
+        config.fb_count = 2;                // double buffering for smoother stream
+        
         if (psramFound()) {
-            config.frame_size = FRAMESIZE_VGA;  // 640x480 - decent resolution
-            config.jpeg_quality = 10;           // OV2640: Lower quality (less compression) = faster, still stable
-            config.fb_count = 2;                // double buffering for smoother stream
-            Serial.println("PSRAM found (ESP32-CAM/OV2640) - using VGA@Q10 for speed");
+            config.grab_mode = CAMERA_GRAB_LATEST;  // Switch to LATEST with PSRAM
+            Serial.println("PSRAM found (ESP32-CAM/OV2640) - using VGA@Q10 with GRAB_LATEST");
         } else {
             config.frame_size = FRAMESIZE_HVGA; // 480x320 when PSRAM missing (better than QVGA)
             config.jpeg_quality = 12;
             config.fb_count = 1;
+            config.fb_location = CAMERA_FB_IN_DRAM;
             Serial.println("PSRAM not found (ESP32-CAM/OV2640) - using HVGA quality fallback");
         }
     #endif
 
     config.fb_location = CAMERA_FB_IN_PSRAM;
-    config.grab_mode = CAMERA_GRAB_LATEST;  // Always get latest frame for live streaming
 
     return config;
 }
@@ -72,42 +80,17 @@ bool initCamera() {
     // Adjust sensor settings
     sensor_t * s = esp_camera_sensor_get();
     if (s != NULL) {
-        // Sensor ID detection for specific optimizations
-        bool isOV3660 = (s->id.PID == OV3660_PID);
-        bool isOV2640 = (s->id.PID == OV2640_PID);
-        
-        if (isOV3660) {
-            Serial.println("OV3660 detected - applying optimizations");
-            s->set_vflip(s, 1);        // Flip vertically
-            s->set_brightness(s, 1);   // Slightly brighter
-            s->set_saturation(s, -2);  // Lower saturation for OV3660
-        } else if (isOV2640) {
-            Serial.println("OV2640 detected - applying optimizations");
-        }
-
-        // Sensor adjustments optimized for quality + speed
-        s->set_brightness(s, 0);     // -2 to 2 (neutral) - override OV3660 custom if needed
-        s->set_contrast(s, 1);       // -2 to 2 (slight boost for clarity)
-        s->set_saturation(s, 0);     // -2 to 2 (natural colors) - overrides OV3660 -2
-        s->set_special_effect(s, 0); // 0 to 6 (0 - No Effect)
-        s->set_whitebal(s, 1);       // 0 = disable , 1 = enable
-        s->set_awb_gain(s, 1);       // 0 = disable , 1 = enable
-        s->set_wb_mode(s, 0);        // 0 to 4 - if awb_gain enabled
-        s->set_exposure_ctrl(s, 1);  // 0 = disable , 1 = enable (auto exposure)
-        s->set_aec2(s, 0);           // 0 = disable , 1 = enable
-        s->set_ae_level(s, 0);       // -2 to 2
-        s->set_aec_value(s, 300);    // Balanced exposure time (0 to 1200)
-        s->set_gain_ctrl(s, 1);      // 0 = disable , 1 = enable
-        s->set_agc_gain(s, 0);       // 0 to 30
-        s->set_gainceiling(s, (gainceiling_t)3);  // Moderate gain for better detail
-        s->set_bpc(s, 1);            // 0 = disable , 1 = enable (enabled for quality)
-        s->set_wpc(s, 1);            // 0 = disable , 1 = enable
-        s->set_raw_gma(s, 1);        // 0 = disable , 1 = enable
-        s->set_lenc(s, 1);           // 0 = disable , 1 = enable (enabled for quality)
-        s->set_hmirror(s, 0);        // 0 = disable , 1 = enable
-        s->set_vflip(s, isOV3660 ? 1 : 0);  // Keep vflip for OV3660, disable for others
-        s->set_dcw(s, 1);            // 0 = disable , 1 = enable
-        s->set_colorbar(s, 0);       // 0 = disable , 1 = enable
+        #if defined(CAMERA_MODEL_ESP32S3_EYE)
+            // ESP32-S3 with OV3660: Match Freenove sketch EXACTLY - only these 3 settings
+            s->set_vflip(s, 1);          // Flip it back
+            s->set_brightness(s, 1);     // Up the brightness just a bit
+            s->set_saturation(s, 0);     // Lower the saturation
+            Serial.println("OV3660 sensor settings applied (Freenove pattern)");
+        #else
+            // ESP32-CAM with OV2640: Keep working settings (was already functional)
+            // OV2640 is more forgiving, doesn't need special treatment
+            Serial.println("OV2640 sensor - using defaults");
+        #endif
     }
 
     Serial.println("Camera initialized successfully");

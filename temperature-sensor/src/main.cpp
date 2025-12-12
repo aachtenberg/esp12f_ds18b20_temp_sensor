@@ -184,6 +184,7 @@ void sendEventToInfluxDB(const String& eventType, const String& message, const S
     return;
   }
 
+  yield(); // Feed watchdog before HTTP operation
   WiFiClient client;
   HTTPClient http;
   http.setTimeout(HTTP_TIMEOUT_MS);
@@ -202,6 +203,7 @@ void sendEventToInfluxDB(const String& eventType, const String& message, const S
   String payload = "device_events,device=" + deviceTag + ",board=" + String(DEVICE_BOARD) + ",event_type=" + eventTypeTag + ",severity=" + severity + " message=\"" + message + "\",value=1";
   
   int httpCode = http.POST(payload);
+  yield(); // Feed watchdog after HTTP operation
   
   if (httpCode > 0) {
     if (httpCode == 204) {
@@ -213,6 +215,7 @@ void sendEventToInfluxDB(const String& eventType, const String& message, const S
     Serial.println("[Event] Failed to log: " + String(http.errorToString(httpCode)));
   }
   http.end();
+  yield(); // Feed watchdog after cleanup
 }
 
 void sendToInfluxDB() {
@@ -226,6 +229,7 @@ void sendToInfluxDB() {
     return;
   }
 
+  yield(); // Feed watchdog before HTTP operation
   WiFiClient client;
   HTTPClient http;
   http.setTimeout(HTTP_TIMEOUT_MS);
@@ -242,6 +246,7 @@ void sendToInfluxDB() {
   String payload = "temperature,sensor=ds18b20,location=esp12f,device=" + deviceTag + " tempC=" + temperatureC + ",tempF=" + temperatureF;
 
   int httpCode = http.POST(payload);
+  yield(); // Feed watchdog after HTTP operation
 
   if (httpCode > 0) {
     if (httpCode == 204) {
@@ -261,6 +266,7 @@ void sendToInfluxDB() {
     }
   }
   http.end();
+  yield(); // Feed watchdog after cleanup
 }
 
 // HTML page with template placeholders
@@ -468,6 +474,14 @@ void setup() {
   Serial.begin(115200);
   delay(1000);
 
+  // Print reset reason for diagnostics
+  #ifdef ESP8266
+    Serial.print("[DEBUG] Reset reason: ");
+    Serial.println(ESP.getResetReason());
+    Serial.print("[DEBUG] Free heap: ");
+    Serial.println(ESP.getFreeHeap());
+  #endif
+
   Serial.println();
   Serial.println("========================================");
   Serial.println("     Temperature Sensor");
@@ -531,7 +545,18 @@ void loop() {
 
   // Periodic temperature reading and InfluxDB send
   if ((millis() - lastTime) > timerDelay) {
+    #ifdef ESP8266
+      // Check heap before operations
+      uint32_t freeHeap = ESP.getFreeHeap();
+      if (freeHeap < 8000) {
+        Serial.print("[WARNING] Low heap: ");
+        Serial.println(freeHeap);
+      }
+    #endif
+    
     updateTemperatures();
+    yield(); // Feed watchdog between operations
+    
     if (temperatureC != "--") {
       sendToInfluxDB();
     }
@@ -545,4 +570,6 @@ void loop() {
     updateDisplay(temperatureC.c_str(), temperatureF.c_str(), wifiConnected, ipStr.c_str());
     lastDisplayUpdate = millis();
   }
+  
+  yield(); // Feed watchdog at end of loop
 }

@@ -16,6 +16,11 @@ static const char* DEVICE_BOARD = "esp32";
 // Timing constants
 static const unsigned long WIFI_CHECK_INTERVAL_MS = 15000;    // Check WiFi connection every 15s
 static const unsigned long TEMPERATURE_READ_INTERVAL_MS = 15000;  // Read temperature every 15s
-static const int HTTP_TIMEOUT_MS = 10000;  // HTTP request timeout
+// HTTP timeout: ESP8266 needs shorter timeout to prevent watchdog resets
+#ifdef ESP8266
+  static const int HTTP_TIMEOUT_MS = 5000;   // 5s timeout for ESP8266
+#else
+  static const int HTTP_TIMEOUT_MS = 10000;  // 10s timeout for ESP32
+#endif
 
 #endif // DEVICE_CONFIG_H
