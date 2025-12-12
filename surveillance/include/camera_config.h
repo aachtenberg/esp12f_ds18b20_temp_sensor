@@ -61,7 +61,7 @@
 #endif
 
 // Camera settings - optimized for quality + speed
-#define CAMERA_XCLK_FREQ  25000000  // 25MHz for fast frame capture
+#define CAMERA_XCLK_FREQ  10000000  // 10MHz for OV3660 stability (matches working Freenove sketch)
 #define CAMERA_FB_COUNT   2         // Double buffering for smooth streaming
 
 // Initialize camera with default settings

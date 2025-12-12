@@ -8,6 +8,7 @@
 #include <base64.h>
 #include <LittleFS.h>
 #include <SD_MMC.h>
+#include <SD.h> // For SD card read/write utilities
 #include <esp_system.h>
 #include <driver/sdmmc_host.h>
 #include <sdmmc_cmd.h>
@@ -22,6 +23,11 @@ RTC_NOINIT_ATTR uint32_t rtcResetCount;      // Counts rapid resets
 RTC_NOINIT_ATTR uint32_t rtcResetTimestamp;  // Timestamp of last reset
 RTC_NOINIT_ATTR uint32_t rtcCrashLoopFlag;   // Magic number if boot incomplete
 RTC_NOINIT_ATTR uint32_t rtcCrashCount;      // Consecutive crash count
+
+// SD_MMC pin definitions for ESP32
+#define SD_MMC_CMD 38 //Please do not modify it.
+#define SD_MMC_CLK 39 //Please do not modify it. 
+#define SD_MMC_D0  40 //Please do not modify it.
 
 // Boot/recovery state
 const char* configPortalReason = "none";     // Why portal was triggered
@@ -104,6 +110,7 @@ void captureAndPublish();
 void captureAndPublishWithImage();
 void publishMetricsToMQTT();
 void logEventToMQTT(const char* event, const char* severity);
+bool saveImageToSD(camera_fb_t* fb, const char* reason);
 
 // Dynamic topic builders (device-specific for multiple camera support)
 String getTopicStatus() { return String(MQTT_TOPIC_BASE) + "/" + deviceName + MQTT_TOPIC_STATUS_SUFFIX; }
@@ -127,6 +134,7 @@ void checkWiFiFallback();
 
 void setup() {
     Serial.begin(115200);
+    SD_MMC.setPins(SD_MMC_CLK, SD_MMC_CMD, SD_MMC_D0);
     delay(2000);  // Extra delay to stabilize serial
 
     Serial.println("\n\n");
@@ -161,9 +169,13 @@ void setup() {
     loadFlashConfig();
 
     // Flash LED for capture illumination (controlled during capture only)
-    pinMode(FLASH_PIN, OUTPUT);
-    digitalWrite(FLASH_PIN, LOW);
-    Serial.printf("[SETUP] Flash LED initialized on GPIO%d (capture flash=%s)\n", FLASH_PIN, flashEnabled ? "ON" : "OFF");
+    if (FLASH_PIN >= 0) {
+        pinMode(FLASH_PIN, OUTPUT);
+        digitalWrite(FLASH_PIN, LOW);
+        Serial.printf("[SETUP] Flash LED initialized on GPIO%d (capture flash=%s)\n", FLASH_PIN, flashEnabled ? "ON" : "OFF");
+    } else {
+        Serial.println("[SETUP] No flash LED available on this board");
+    }
 
     // Mount SD card (1-bit mode for ESP32-CAM) for capture storage
     setupSD();
@@ -286,7 +298,7 @@ void loop() {
                 }
                 
                 // Flash LED on motion if enabled (respects both motion flash setting and manual override)
-                if (flashMotionEnabled && !flashManualOn) {
+                if (flashMotionEnabled && !flashManualOn && FLASH_PIN >= 0) {
                     digitalWrite(FLASH_PIN, HIGH);
                     flashOffTime = currentMillis + FLASH_PULSE_MS;
                     Serial.printf("[FLASH] Motion indicator triggered for %d ms\n", FLASH_PULSE_MS);
@@ -297,7 +309,7 @@ void loop() {
     }
 
     // Turn off flash LED after motion pulse duration (only if not in manual mode)
-    if (!flashManualOn && flashOffTime > 0 && currentMillis >= flashOffTime) {
+    if (!flashManualOn && flashOffTime > 0 && currentMillis >= flashOffTime && FLASH_PIN >= 0) {
         digitalWrite(FLASH_PIN, LOW);
         flashOffTime = 0;
     }
@@ -400,15 +412,12 @@ bool checkCameraMotion() {
         previousFrame[i] = currentGray;
     }
 
-    // Debug: Always log the change analysis
-    float changePercent = (float)changedPixels / totalPixels * 100.0;
-    Serial.printf("[Motion] Analysis: %d/%d pixels changed (%.1f%%) - threshold: %d pixels\n",
-                  changedPixels, totalPixels, changePercent, MOTION_CHANGED_BLOCKS);
-
     // Determine if motion detected
     if (changedPixels >= MOTION_CHANGED_BLOCKS) {
         motionDetected = true;
-        Serial.printf("[Motion] *** MOTION DETECTED *** Count: %lu\n", motionDetectCount + 1);
+        float changePercent = (float)changedPixels / totalPixels * 100.0;
+        Serial.printf("[Motion] *** DETECTED *** %d/%d pixels changed (%.1f%%) - Count: %lu\n",
+                      changedPixels, totalPixels, changePercent, motionDetectCount + 1);
         motionDetectCount++;
     }
 
@@ -572,57 +581,69 @@ void gracefulSDShutdown() {
 }
 
 void setupSD() {
-    Serial.println("[SD] Mounting SD card with low-level sdmmc API...");
+    Serial.println("[SD] Mounting SD card...");
     
-    #if SD_GRACEFUL_UNMOUNT
-    // Always unmount any previous mount first (ignore errors)
-    SD_MMC.end();
-    vTaskDelay(pdMS_TO_TICKS(100));
-    #endif
+    // Attempt to mount SD card with 1-bit mode
+    if (!SD_MMC.begin("/sdcard", true, true, SDMMC_FREQ_DEFAULT, 5)) {
+      Serial.println("[SD] Card Mount Failed");
+      return;
+    }
     
-    // Low-level sdmmc configuration (fixes 98% of SD card issues)
-    sdmmc_host_t host = SDMMC_HOST_DEFAULT();
-    host.max_freq_khz = 19000;              // Stay under 20 MHz for compatibility
-    host.flags = SDMMC_HOST_FLAG_1BIT;      // 1-bit mode (CLK, CMD, D0 only)
-    host.command_timeout_ms = 1000;         // Critical: prevents timeouts
-    
-    // Initialize host
-    esp_err_t ret = sdmmc_host_init();
-    if (ret != ESP_OK) {
-        Serial.printf("[SD] Host init failed: 0x%x\n", ret);
+    uint8_t cardType = SD_MMC.cardType();
+    if (cardType == CARD_NONE) {
+        Serial.println("[SD] No SD card attached");
         sdReady = false;
         return;
     }
+    Serial.print("SD_MMC Card Type: ");
     
-    // Force 400 kHz clock during card initialization
-    sdmmc_host_set_card_clk(host.slot, 400);
-    
-    // Initialize card
-    sdmmc_card_t card;
-    ret = sdmmc_card_init(&host, &card);
-    if (ret != ESP_OK) {
-        Serial.printf("[SD] Card init failed: 0x%x\n", ret);
-        sdmmc_host_deinit();
-        sdReady = false;
-        return;
-    }
-    
-    // Switch back to full speed (19 MHz)
-    sdmmc_host_set_card_clk(host.slot, 19000);
-    
-    // Print card info
-    Serial.printf("[SD] Card initialized: %d MB, speed=%d kHz\n",
-        card.csd.capacity / (1024 * 2),
-        host.max_freq_khz);
-    
-    // Now mount filesystem on top of initialized card
-    if (SD_MMC.begin("/sdcard", true, false, 19000000)) {
-        sdReady = true;
-        Serial.println("[SD] Filesystem mounted successfully");
+    if(cardType == CARD_MMC){
+        Serial.println("MMC");
+    } else if(cardType == CARD_SD){
+        Serial.println("SDSC");
+    } else if(cardType == CARD_SDHC){
+        Serial.println("SDHC");
     } else {
-        Serial.println("[SD] Filesystem mount failed");
-        sdmmc_host_deinit();
-        sdReady = false;
+        Serial.println("UNKNOWN");
+    }
+
+    sdReady = true;
+    uint64_t cardSize = SD_MMC.cardSize() / (1024 * 1024);
+    Serial.printf("[SD] Card mounted successfully: %llu MB, Type: %d\n", cardSize, cardType);
+    
+    // Ensure capture directory exists
+    if (!SD_MMC.exists(SD_CAPTURE_DIR)) {
+        if (SD_MMC.mkdir(SD_CAPTURE_DIR)) {
+            Serial.printf("[SD] Created capture directory: %s\n", SD_CAPTURE_DIR);
+        } else {
+            Serial.println("[SD] Failed to create capture directory");
+        }
+    }
+}
+
+bool saveImageToSD(camera_fb_t* fb, const char* reason) {
+    if (!sdReady || !fb) {
+        return false;
+    }
+    
+    char path[80];
+    snprintf(path, sizeof(path), "%s/%lu_%s.jpg", SD_CAPTURE_DIR, millis(), reason);
+    
+    File file = SD_MMC.open(path, "w");
+    if (!file) {
+        Serial.println("[SD] Failed to open file for writing");
+        return false;
+    }
+    
+    size_t written = file.write(fb->buf, fb->len);
+    file.close();
+    
+    if (written == fb->len) {
+        Serial.printf("[SD] Saved %s: %s (%u bytes)\n", reason, path, (unsigned int)fb->len);
+        return true;
+    } else {
+        Serial.printf("[SD] Write failed: expected %u, wrote %u\n", (unsigned int)fb->len, (unsigned int)written);
+        return false;
     }
 }
 
@@ -802,7 +823,7 @@ void handleMotionDetection() {
     
     // Always flash on motion (save current manual state)
     bool wasManualOn = flashManualOn;
-    if (!wasManualOn) {
+    if (!wasManualOn && FLASH_PIN >= 0) {
         digitalWrite(FLASH_PIN, HIGH);
         Serial.println("[FLASH] Motion flash triggered");
     }
@@ -1045,6 +1066,14 @@ void setupWebServer() {
         doc["mqtt_connected"] = mqttConnected;
         doc["motion_enabled"] = motionEnabled;
         doc["sd_ready"] = sdReady;
+        
+        // Board capabilities
+        #if defined(CAMERA_MODEL_AI_THINKER)
+            doc["has_flash_led"] = true;
+        #else
+            doc["has_flash_led"] = false;
+        #endif
+        
         if (sdReady) {
             doc["sd_size_mb"] = SD_MMC.cardSize() / (1024 * 1024);
             doc["sd_used_mb"] = SD_MMC.usedBytes() / (1024 * 1024);
@@ -1216,7 +1245,7 @@ void captureAndPublish() {
                   flashManualOn ? "ON" : "OFF");
 
     // Always flash on capture (unless in manual mode)
-    if (!flashManualOn) {
+    if (!flashManualOn && FLASH_PIN >= 0) {
         digitalWrite(FLASH_PIN, HIGH);
         Serial.println("[FLASH] LED ON for capture");
         delay(100);  // Give flash time to reach full brightness
@@ -1225,7 +1254,7 @@ void captureAndPublish() {
     camera_fb_t * fb = capturePhoto();
     
     // Turn off flash after capture (only if we turned it on)
-    if (!flashManualOn) {
+    if (!flashManualOn && FLASH_PIN >= 0) {
         digitalWrite(FLASH_PIN, LOW);
         Serial.println("[FLASH] LED OFF after capture");
     }
@@ -1238,6 +1267,9 @@ void captureAndPublish() {
 
     captureCount++;
     Serial.printf("Image captured: %d bytes\n", fb->len);
+    
+    // Save to SD card if available
+    saveImageToSD(fb, "capture");
 
     // Publish image to MQTT (in chunks if needed)
     // Note: Large images may need to be published in chunks or base64 encoded
@@ -1266,7 +1298,7 @@ void captureAndPublishWithImage() {
                   flashManualOn ? "ON" : "OFF");
 
     // Always flash on capture (unless in manual mode)
-    if (!flashManualOn) {
+    if (!flashManualOn && FLASH_PIN >= 0) {
         digitalWrite(FLASH_PIN, HIGH);
         Serial.println("[FLASH] LED ON for image capture");
         delay(100);  // Give flash time to reach full brightness
@@ -1275,7 +1307,7 @@ void captureAndPublishWithImage() {
     camera_fb_t * fb = capturePhoto();
     
     // Turn off flash after capture (only if we turned it on)
-    if (!flashManualOn) {
+    if (!flashManualOn && FLASH_PIN >= 0) {
         digitalWrite(FLASH_PIN, LOW);
         Serial.println("[FLASH] LED OFF after image capture");
     }
@@ -1288,6 +1320,9 @@ void captureAndPublishWithImage() {
 
     captureCount++;
     Serial.printf("Image captured: %d bytes\n", fb->len);
+    
+    // Save to SD card if available
+    saveImageToSD(fb, "full");
 
     // Encode to base64
     String base64Image = base64::encode(fb->buf, fb->len);
@@ -1364,15 +1399,19 @@ void handleRoot(AsyncWebServerRequest *request) {
 *{box-sizing:border-box}
 body{font-family:Inter,Arial,Helvetica,sans-serif;background:var(--bg);color:var(--text);font-size:14px;margin:0;padding:0;height:100vh;overflow:hidden}
 a{color:var(--text)}
-.container{display:flex;flex-direction:column;height:100vh}
-#top-bar{background:var(--panel);border-bottom:1px solid var(--border);padding:12px 16px;display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+.container{display:flex;flex-direction:column;height:100vh;overflow:hidden}
+#top-bar{background:var(--panel);border-bottom:1px solid var(--border);padding:12px 16px;display:flex;gap:12px;align-items:center;flex-wrap:wrap;flex-shrink:0}
 #controls-group{display:flex;gap:12px;align-items:center;flex:1;flex-wrap:wrap;min-width:0}
-#stream-area{display:flex;flex:1;min-height:0;gap:12px;padding:12px}
-#stream-container{flex:1;display:flex;flex-direction:column;min-width:0;background:var(--panel-alt);border:1px solid var(--border);border-radius:8px;overflow:hidden}
-#stream-container img{max-width:100%;max-height:100%;object-fit:contain}
+#stream-area{display:flex;flex:1;min-height:0;gap:12px;padding:12px;overflow:hidden}
+#stream-container{flex:1;display:flex;flex-direction:column;min-width:0;background:var(--panel-alt);border:1px solid var(--border);border-radius:8px;overflow:hidden;position:relative;align-items:center;justify-content:center;min-height:300px}
+#stream-container img{max-width:100%;max-height:100%;object-fit:contain;position:relative;z-index:1}
+#stream-container.no-image::before{content:'📷';font-size:clamp(48px,8vw,128px);opacity:0.3;position:absolute;z-index:0;line-height:1}
+#stream-container.no-image::after{content:'No Image';position:absolute;top:calc(50% + clamp(35px,5vw,80px));font-size:clamp(14px,1.5vw,20px);color:var(--muted);opacity:0.6;z-index:0;white-space:nowrap}
 #right-panel{width:300px;background:var(--panel);border:1px solid var(--border);border-radius:8px;display:flex;flex-direction:column;transition:width 0.3s ease,opacity 0.3s ease;max-height:100%}
 #right-panel.collapsed{width:0;opacity:0;overflow:hidden;padding:0;border:0}
 #right-toggle{width:30px;height:30px;padding:0;margin:0;background:var(--accent)}
+#mobile-backdrop{display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.5);z-index:998;opacity:0;transition:opacity 0.3s ease}
+#mobile-backdrop.visible{display:block;opacity:1}
 .panel-header{padding:12px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;font-weight:600;flex-shrink:0}
 .panel-content{padding:12px;overflow-y:auto;overflow-x:hidden;flex:1;min-height:0}
 .panel-content::-webkit-scrollbar{width:8px}
@@ -1426,16 +1465,18 @@ select{border:1px solid var(--border);font-size:14px;height:22px;outline:0;borde
 }
 @media (max-width:768px){
 #top-bar{flex-direction:column;align-items:stretch;padding:8px}
-#stream-area{flex-direction:column;gap:8px;padding:8px}
-#right-panel{display:none;width:100%}
-#right-toggle{display:block}
-#right-panel.mobile-visible{display:flex;position:fixed;right:0;top:0;bottom:0;z-index:1000;height:100vh;width:90%;max-width:320px;box-shadow:-4px 0 12px rgba(0,0,0,0.3)}
-.panel-content{padding:8px}
+#stream-area{flex-direction:column;gap:8px;padding:8px;overflow-y:auto}
+#stream-container{min-height:200px;flex:0 0 auto}
+#right-panel{display:none;width:100%;flex:0 0 auto}
+#right-toggle{display:block;position:fixed;bottom:16px;right:16px;width:48px;height:48px;border-radius:50%;z-index:1001;font-size:20px;box-shadow:0 4px 12px rgba(0,0,0,0.3)}
+#right-panel.mobile-visible{display:flex;position:fixed;right:0;top:0;bottom:0;z-index:1000;height:100vh;width:90%;max-width:320px;box-shadow:-4px 0 12px rgba(0,0,0,0.3);overflow-y:auto}
+.panel-content{padding:8px;overflow-y:auto}
 .input-group{margin:6px 0;padding:6px}
 button{font-size:13px;padding:0 8px;line-height:26px}
 .section-title{margin-top:8px;margin-bottom:4px}
 }
 @media (max-width:480px){
+#stream-container{min-height:180px}
 #right-panel.mobile-visible{width:100%;max-width:100%}
 .input-group{flex-direction:column;align-items:stretch}
 .input-group>label{min-width:auto;margin-bottom:4px}
@@ -1489,6 +1530,7 @@ button{font-size:13px;padding:0 8px;line-height:26px}
 </div>
 <button id="right-toggle">⚙</button>
 </div>
+<div id="mobile-backdrop"></div>
 <div id="stream-area">
 <div id="stream-container">
 <img id="stream" src="">
@@ -1671,7 +1713,7 @@ button{font-size:13px;padding:0 8px;line-height:26px}
 <label class="slider" for="colorbar"></label>
 </div>
 </div>
-<div class="section-title">Flash LED</div>
+<div class="section-title" id="flash-section-title">Flash LED</div>
 <div class="input-group" id="flash_master-group">
 <label for="flash_master">Manual Flashlight</label>
 <div class="switch">
@@ -1696,6 +1738,17 @@ const streamButton=document.getElementById('toggle-stream');
 const rightPanel=document.getElementById('right-panel');
 const rightToggle=document.getElementById('right-toggle');
 let isStreaming=false;
+// Image placeholder management
+view.addEventListener('load',()=>{
+if(view.src&&view.src!==window.location.href){
+streamContainer.classList.remove('no-image');
+}
+});
+view.addEventListener('error',()=>{
+streamContainer.classList.add('no-image');
+});
+// Initialize with placeholder
+streamContainer.classList.add('no-image');
 const hide=el=>el.classList.add('hidden');
 const show=el=>el.classList.remove('hidden');
 const updateValue=(el,value,updateRemote)=>{
@@ -1754,12 +1807,19 @@ const setConnectivity=(rssi,mqtt)=>{
  }
 };
 // Panel toggle (works for both desktop collapsed and mobile slide-in)
+const backdrop=document.getElementById('mobile-backdrop');
 rightToggle.onclick=()=>{
  if(window.innerWidth<=768){
  rightPanel.classList.toggle('mobile-visible');
+ backdrop.classList.toggle('visible');
  } else {
  rightPanel.classList.toggle('collapsed');
  }
+};
+// Close panel when clicking backdrop
+backdrop.onclick=()=>{
+ rightPanel.classList.remove('mobile-visible');
+ backdrop.classList.remove('visible');
 };
 // Load initial settings and device info
 fetch(`${baseHost}/status`).then(response=>response.json()).then(state=>{
@@ -1803,6 +1863,13 @@ setPill('status-warn','Camera not ready');
 }
 }
 setConnectivity(state.wifi_rssi,state.mqtt_connected);
+// Hide flash LED controls if board doesn't have flash LED
+if(state.has_flash_led===false){
+const flashTitle=document.getElementById('flash-section-title');
+const flashGroup=document.getElementById('flash_master-group');
+if(flashTitle)flashTitle.style.display='none';
+if(flashGroup)flashGroup.style.display='none';
+}
 }).catch(err=>{
 console.error('Status load failed',err);
 });
@@ -1828,6 +1895,7 @@ console.error('Status poll failed',err);
 // Stream controls
 const stopStream=()=>{
 view.src='';
+streamContainer.classList.add('no-image');
 streamButton.textContent='Start Stream';
 isStreaming=false;
  setPill('status-ok','Ready');
@@ -1840,7 +1908,26 @@ isStreaming=true;
 };
 stillButton.onclick=()=>{
 stopStream();
-view.src=`${baseHost}/capture?_cb=${Date.now()}`;
+fetch(`${baseHost}/capture?_cb=${Date.now()}`)
+.then(response=>{
+const savedToSD=response.headers.get('X-SD-Saved');
+if(savedToSD==='true'){
+setPill('status-ok','Saved to SD');
+setTimeout(()=>setPill('status-ok','Ready'),2000);
+}else if(savedToSD==='false'){
+setPill('status-warn','SD save failed');
+setTimeout(()=>setPill('status-ok','Ready'),2000);
+}
+return response.blob();
+})
+.then(blob=>{
+view.src=URL.createObjectURL(blob);
+})
+.catch(err=>{
+console.error('Capture failed:',err);
+setPill('status-bad','Capture failed');
+setTimeout(()=>setPill('status-ok','Ready'),2000);
+});
 };
 streamButton.onclick=()=>{
 isStreaming?stopStream():startStream();
@@ -1991,7 +2078,7 @@ void handleCapture(AsyncWebServerRequest *request) {
     
     // Always flash on capture (save current manual state)
     bool wasManualOn = flashManualOn;
-    if (!wasManualOn) {
+    if (!wasManualOn && FLASH_PIN >= 0) {
         digitalWrite(FLASH_PIN, HIGH);
         delay(100);  // Allow flash to reach brightness
     }
@@ -1999,7 +2086,7 @@ void handleCapture(AsyncWebServerRequest *request) {
     camera_fb_t * fb = capturePhoto();
     
     // Restore flash state after capture
-    if (!wasManualOn) {
+    if (!wasManualOn && FLASH_PIN >= 0) {
         digitalWrite(FLASH_PIN, LOW);
     }
     
@@ -2026,6 +2113,7 @@ void handleCapture(AsyncWebServerRequest *request) {
     returnFrameBuffer(fb);
 
     // Save to SD card if available
+    bool sdSaved = false;
     if (sdReady) {
         char path[64];
         snprintf(path, sizeof(path), "%s/%lu_%lu.jpg", SD_CAPTURE_DIR, millis(), captureCount);
@@ -2034,6 +2122,7 @@ void handleCapture(AsyncWebServerRequest *request) {
             file.write(copyBuf, copyLen);
             file.close();
             Serial.printf("[SD] Saved capture: %s (%u bytes)\n", path, (unsigned int)copyLen);
+            sdSaved = true;
         } else {
             Serial.println("[SD] Failed to write capture");
         }
@@ -2044,6 +2133,7 @@ void handleCapture(AsyncWebServerRequest *request) {
     AsyncWebServerResponse *response = request->beginResponse_P(200, "image/jpeg", copyBuf, copyLen);
     response->addHeader("Content-Disposition", "inline; filename=capture.jpg");
     response->addHeader("Access-Control-Allow-Origin", "*");
+    response->addHeader("X-SD-Saved", sdSaved ? "true" : "false");
     request->onDisconnect([copyBuf]() {
         free(copyBuf);
     });
@@ -2305,8 +2395,10 @@ void handleFlashControl(AsyncWebServerRequest *request) {
     flashManualOn = newManual;
     
     // Re-initialize GPIO to ensure it's in OUTPUT mode
-    pinMode(FLASH_PIN, OUTPUT);
-    digitalWrite(FLASH_PIN, flashManualOn ? HIGH : LOW);
+    if (FLASH_PIN >= 0) {
+        pinMode(FLASH_PIN, OUTPUT);
+        digitalWrite(FLASH_PIN, flashManualOn ? HIGH : LOW);
+    }
     
     Serial.printf("[FLASH] Manual flashlight=%s (GPIO%d)\n",
                   flashManualOn ? "ON" : "OFF", FLASH_PIN);

@@ -38,8 +38,12 @@
 // Status LED (if available)
 #define STATUS_LED_PIN 2
 
-// Flash/Strobe LED for motion indication
-#define FLASH_PIN 4  // GPIO4 for AI-Thinker ESP32-CAM (Flash LED)
+// Flash/Strobe LED for motion indication (board-specific)
+#if defined(CAMERA_MODEL_ESP32S3_EYE)
+  #define FLASH_PIN -1  // ESP32-S3 board has no flash LED
+#else
+  #define FLASH_PIN 4  // GPIO4 for AI-Thinker ESP32-CAM (Flash LED)
+#endif
 #define FLASH_PULSE_MS 200  // 200ms pulse duration for motion flash
 
 // PIR Motion Sensor (AM312)
