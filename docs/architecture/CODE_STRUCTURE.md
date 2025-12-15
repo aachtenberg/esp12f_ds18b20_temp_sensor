@@ -3,251 +3,244 @@
 ## Main Firmware (`temperature-sensor/src/main.cpp`)
 
 ### Overview
-- **520+ lines** of fully commented C++
-- **Modular design** with clear function separation
-- **Production-ready** with error handling throughout
+- **620+ lines** of fully commented C++
+- **Modular MQTT-based design** with clear function separation
+- **Production-ready** with comprehensive error handling and logging
+- **Migrated from InfluxDB HTTP** to MQTT JSON publishing (December 2025)
 
 ### Key Components
 
-#### 1. Libraries & Configuration (Lines 1-40)
+#### 1. Libraries & Configuration (Lines 1-50)
 
 ```cpp
 #include <Arduino.h>
-#include <ESP8266WiFi.h>
-#include <ESPAsyncWebServer.h>
+#include <WiFi.h>
+#include <WiFiManager.h>
 #include <OneWire.h>
 #include <DallasTemperature.h>
-#include <ESP8266HTTPClient.h>
-#include <PubSubClient.h>
+#include <PubSubClient.h>           // MQTT client
+#include <ArduinoJson.h>            // JSON serialization
+#include <U8g2lib.h>                // OLED display (optional)
 #include "secrets.h"
+#include "device_config.h"
+#include "display.h"
 
-#define ONE_WIRE_BUS 4  // GPIO 4 for DS18B20
+#define ONE_WIRE_PIN 4  // GPIO 4 for DS18B20
 ```
 
-**What it does**: Imports all necessary libraries for WiFi, async web server, OneWire protocol, temperature sensor, HTTP client, and MQTT.
+**What it does**: Imports libraries for WiFi/WiFiManager, OneWire/temperature, MQTT, JSON serialization, and optional OLED display support.
 
-#### 2. Global Objects (Lines 40-50)
+#### 2. Global Objects (Lines 50-100)
 
 ```cpp
-OneWire oneWire(ONE_WIRE_BUS);
+OneWire oneWire(ONE_WIRE_PIN);
 DallasTemperature sensors(&oneWire);
-String temperatureF = "--";
-String temperatureC = "--";
-unsigned long lastTime = 0;  
-unsigned long timerDelay = 30000;  // 30 seconds
-AsyncWebServer server(80);
 WiFiClient espClient;
 PubSubClient mqttClient(espClient);
-```
+String chipId = "";
+String topicBase = "";
+String deviceName = "Unnamed";
+unsigned long lastTemperatureRead = 0;
+unsigned long lastMqttPublish = 0;
 
-**What it does**: Creates OneWire/DallasTemperature objects, initializes temperature globals, sets up timer, creates async web server and MQTT client.
-
-#### 3. Log Buffering System (Lines 65-85)
-
-```cpp
-#define MAX_LOG_ENTRIES 50
-struct LogEntry {
-  String message;
-  unsigned long timestamp;
+struct DeviceMetrics {
+  uint32_t wifiReconnects;
+  uint32_t sensorReadFailures;
+  uint32_t mqttPublishFailures;
+  unsigned long lastSuccessfulMqttPublish;
 };
-LogEntry logBuffer[MAX_LOG_ENTRIES];
-int logIndex = 0;
-
-void logMessage(String msg) {
-  Serial.println(msg);  // Always print to serial
-  if (logIndex < MAX_LOG_ENTRIES) {
-    logBuffer[logIndex].message = msg;
-    logBuffer[logIndex].timestamp = millis();
-    logIndex++;
-  }
-}
+DeviceMetrics metrics = {0, 0, 0, 0};
 ```
 
 **What it does**:
-- Creates circular buffer for up to 50 log entries
-- Captures all `logMessage()` calls with timestamps
-- Prevents buffer overflow by checking `logIndex`
-- Each entry stores message text and timestamp
+- Creates OneWire/DallasTemperature objects for DS18B20
+- Initializes WiFi and MQTT clients
+- Generates chip ID from MAC address
+- Tracks metrics for monitoring (reconnects, failures, last publish)
 
-**Usage**:
+#### 3. MQTT Topic Helpers (Lines 100-150)
+
 ```cpp
-logMessage("Temperature C: 23.38");  // Captured to buffer
-logMessage("Error reading sensor");   // Also captured
+String generateChipId() {
+  uint8_t mac[6];
+  WiFi.macAddress(mac);
+  String chipId = "";
+  for (int i = 0; i < 6; i++) {
+    if (mac[i] < 0x10) chipId += "0";
+    chipId += String(mac[i], HEX);
+  }
+  chipId.toUpperCase();
+  return chipId;
+}
+
+void updateTopicBase() {
+  String cleanName = deviceName;
+  cleanName.replace(" ", "-");
+  topicBase = "esp-sensor-hub/" + cleanName;
+}
+
+String getTopicTemperature() { return topicBase + "/temperature"; }
+String getTopicStatus() { return topicBase + "/status"; }
+String getTopicEvents() { return topicBase + "/events"; }
 ```
 
-#### 4. Temperature Reading (Lines 87-105)
+**What it does**:
+- Derives unique device ID from WiFi MAC address
+- Constructs topic prefix from device name
+- Provides topic getter functions for temperature, status, and events
+- Used throughout publish code for consistent topic structure
+
+#### 4. Temperature Reading (Lines 150-200)
 
 ```cpp
-void updateTemperatures() {
+void readTemperature() {
   sensors.requestTemperatures();
   float tC = sensors.getTempCByIndex(0);
+  
   if (tC == DEVICE_DISCONNECTED_C) {
-    temperatureC = "--";
-    temperatureF = "--";
-    logMessage("DS18B20 read failed");
+    Serial.println("[TEMP] DS18B20 disconnected");
+    metrics.sensorReadFailures++;
   } else {
-    char buf[16];
-    dtostrf(tC, 0, 2, buf);  // Format with 2 decimals
-    temperatureC = String(buf);
-    float tF = sensors.toFahrenheit(tC);
-    dtostrf(tF, 0, 2, buf);
-    temperatureF = String(buf);
-    logMessage("Temperature C: " + temperatureC);
-    logMessage("Temperature F: " + temperatureF);
+    Serial.print("[TEMP] Reading: ");
+    Serial.print(tC);
+    Serial.println("°C");
   }
+  lastTemperatureRead = millis();
 }
 ```
 
 **What it does**:
 - Requests temperature from DS18B20
-- Formats to 2 decimal places
-- Updates global `temperatureC` and `temperatureF`
-- Logs results and any errors
-- Called every 30 seconds from main loop
+- Logs reading to serial for debugging
+- Tracks sensor failure count in metrics
+- Called every 30 seconds before publishing
 
-**Failure handling**: If sensor disconnected, sets temps to "--" and logs error
-
-#### 5. CloudWatch Upload (Lines 125-165)
+#### 5. MQTT Connection Management (Lines 200-250)
 
 ```cpp
-void sendToLambda() {
-  if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("WiFi not connected...");
-    return;
-  }
-  if (logIndex == 0) return;  // No logs to send
-
-  WiFiClientSecure client;
-  client.setInsecure();  // Disable SSL verification
-  HTTPClient http;
+bool ensureMqttConnected() {
+  if (mqttClient.connected()) return true;
   
-  http.begin(client, LAMBDA_ENDPOINT);
-  http.addHeader("Content-Type", "application/json");
-  
-  // Build JSON payload with all buffered logs
-  String payload = "{\"device\":\"" + String(PAGE_TITLE) + "\","
-                   "\"timestamp\":" + String(millis()) + ","
-                   "\"tempC\":" + temperatureC + ","
-                   "\"tempF\":" + temperatureF + ","
-                   "\"logCount\":" + String(logIndex) + ","
-                   "\"logs\":[";
-  
-  for (int i = 0; i < logIndex; i++) {
-    payload += "{\"msg\":\"" + logBuffer[i].message.substring(0, 100) + "\","
-               "\"ts\":" + String(logBuffer[i].timestamp) + "}";
-    if (i < logIndex - 1) payload += ",";
+  if (millis() - lastMqttPublish < MQTT_RECONNECT_INTERVAL_MS) {
+    return false;  // Wait before retry
   }
   
-  payload += "]}";
+  Serial.print("[MQTT] Attempting connection to ");
+  Serial.print(MQTT_BROKER);
+  Serial.print(":");
+  Serial.println(MQTT_PORT);
   
-  int httpCode = http.POST(payload);
-  
-  if (httpCode == 200) {
-    String response = http.getString();
-    Serial.println("Lambda response: " + response);
-    logIndex = 0;  // Clear buffer on success
+  if (mqttClient.connect(chipId.c_str(), MQTT_USER, MQTT_PASSWORD)) {
+    Serial.println("[MQTT] Connected to broker successfully");
+    return true;
   } else {
-    Serial.println("Lambda error: " + String(httpCode));
+    Serial.print("[MQTT] Connection failed, state: ");
+    Serial.println(mqttClient.state());
+    metrics.wifiReconnects++;
+    return false;
   }
-  
-  http.end();
 }
 ```
 
 **What it does**:
-1. Checks WiFi connection
-2. Builds JSON with temperature + all buffered logs
-3. POSTs to Lambda endpoint via API Gateway
-4. Receives and parses response
-5. Clears buffer on HTTP 200 success
-6. Retains buffer on failure for retry
+- Maintains MQTT broker connection
+- Implements 5-second retry interval
+- Logs connection attempts and failures with MQTT state codes
+- Updates reconnect counter on failures
+- Called before every publish operation
 
-**Payload format**:
-```json
-{
-  "device": "Big Garage Temperature",
-  "timestamp": 123456789,
-  "tempC": 23.38,
-  "tempF": 74.07,
-  "logCount": 6,
-  "logs": [
-    {"msg": "Temperature C: 23.38", "ts": 123400001},
-    {"msg": "Temperature F: 74.07", "ts": 123400002},
-    ...
-  ]
-}
-```
-
-#### 6. Web Server Setup (Lines 167-245)
+#### 6. JSON Payload Publishing (Lines 250-300)
 
 ```cpp
-void setup(){
-  Serial.begin(115200);
-  sensors.begin();
-  updateTemperatures();
-  
-  WiFi.setSleepMode(WIFI_NONE_SLEEP);  // Stable connection
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-  Serial.println("Connecting to WiFi");
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(500);
-    Serial.print(".");
+bool publishJson(const String& topic, JsonDocument& doc, bool retain = false) {
+  if (!ensureMqttConnected()) {
+    Serial.println("[MQTT] Not connected, skipping publish");
+    return false;
   }
-  Serial.println();
-  Serial.println(WiFi.localIP());
   
-  // Web server routes
-  server.on("/", HTTP_GET, [](AsyncWebServerRequest *request){
-    request->send_P(200, "text/html", index_html, processor);
-  });
+  String payload;
+  serializeJson(doc, payload);
   
-  server.on("/temperaturec", HTTP_GET, [](AsyncWebServerRequest *request){
-    request->send(200, "text/plain", temperatureC);
-  });
+  Serial.print("[MQTT] Publishing to ");
+  Serial.print(topic);
+  Serial.print(" (retain=");
+  Serial.print(retain ? "true" : "false");
+  Serial.print(") payload: ");
+  Serial.println(payload);
   
-  server.on("/temperaturef", HTTP_GET, [](AsyncWebServerRequest *request){
-    request->send(200, "text/plain", temperatureF);
-  });
+  bool ok = mqttClient.publish(topic.c_str(), payload.c_str(), retain);
   
-  server.begin();
+  if (ok) {
+    Serial.println("[MQTT] Publish successful");
+    metrics.lastSuccessfulMqttPublish = millis();
+  } else {
+    Serial.println("[MQTT] Publish failed");
+    metrics.mqttPublishFailures++;
+  }
+  return ok;
+}
+
+void publishTemperature(float celsius, float fahrenheit) {
+  Serial.print("[TEMP] Building temperature payload: C=");
+  Serial.print(celsius);
+  Serial.print(" F=");
+  Serial.println(fahrenheit);
+  
+  StaticJsonDocument<256> doc;
+  doc["device"] = deviceName;
+  doc["chip_id"] = chipId;
+  doc["timestamp"] = millis() / 1000;
+  doc["celsius"] = celsius;
+  doc["fahrenheit"] = fahrenheit;
+  
+  publishJson(getTopicTemperature(), doc, false);  // Non-retained
+}
+
+void publishStatus() {
+  Serial.println("[STATUS] Building status payload");
+  // ... WiFi/heap info ...
+  
+  StaticJsonDocument<256> doc;
+  doc["device"] = deviceName;
+  doc["chip_id"] = chipId;
+  doc["uptime_seconds"] = millis() / 1000;
+  doc["wifi_connected"] = (WiFi.status() == WL_CONNECTED);
+  doc["wifi_rssi"] = WiFi.RSSI();
+  doc["free_heap"] = ESP.getFreeHeap();
+  
+  publishJson(getTopicStatus(), doc, true);  // Retained
 }
 ```
 
-**Web endpoints**:
-- `GET /` → HTML dashboard
-- `GET /temperaturec` → Celsius (plain text)
-- `GET /temperaturef` → Fahrenheit (plain text)
+**What it does**:
+- Generic JSON publisher with logging and error handling
+- Publishes temperature readings (non-retained for streaming)
+- Publishes device status every 30s (retained for last-known state)
+- Handles connection failures and tracks publish success rate
 
-#### 7. Main Loop (Lines 245-285)
+#### 7. Event Logging (Lines 300-350)
 
 ```cpp
-void loop(){
-  // WiFi reconnection logic
-  if (WiFi.status() != WL_CONNECTED) {
-    logMessage("WiFi disconnected, attempting reconnection...");
-    // ... reconnection attempts ...
-    if (WiFi.status() != WL_CONNECTED) {
-      logMessage("Reconnection failed, restarting ESP...");
-      ESP.restart();
-    }
-  }
+void publishEvent(const String& eventType, const String& message, 
+                  const String& severity = "info") {
+  StaticJsonDocument<256> doc;
+  doc["device"] = deviceName;
+  doc["chip_id"] = chipId;
+  doc["event"] = eventType;
+  doc["severity"] = severity;
+  doc["timestamp"] = millis() / 1000;
+  doc["message"] = message;
   
-  // MQTT disabled (optional, commented out)
-  // if (!mqttClient.connected()) { ... }
-  
-  // Main 30-second cycle
-  if ((millis() - lastTime) > timerDelay) {
-    updateTemperatures();           // Read sensor
-    if (temperatureC != "--") {
-      sendToLambda();              // Upload to CloudWatch
-    }
-    lastTime = millis();
-  }
+  publishJson(getTopicEvents(), doc, false);  // Non-retained
 }
 ```
 
-**Execution flow**:
-1. Check WiFi, reconnect if needed
+**Called on**:
+- Boot: `publishEvent("boot", "Device started", "info")`
+- WiFi events: `publishEvent("wifi_disconnect", "Lost connection", "warning")`
+- Sensor errors: `publishEvent("sensor_error", "Read failed", "error")`
+
+#### 8. Main Loop (Lines 350-450)
 2. Every 30 seconds:
    - Read DS18B20 temperature
    - Send buffered logs to Lambda
@@ -283,7 +276,7 @@ static const char* INFLUXDB_BUCKET = "sensor_data";
 static const char* INFLUXDB_TOKEN = "...";
 
 // MQTT (disabled by default)
-static const char* MQTT_BROKER = "192.168.0.167";
+static const char* MQTT_BROKER = "your.mqtt.broker.com";
 static const int MQTT_PORT = 1883;
 static const char* MQTT_TOPIC = "esp12f/logs";
 static const char* MQTT_USER = "";

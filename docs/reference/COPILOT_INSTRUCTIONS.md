@@ -26,9 +26,9 @@
 
 ## ❌ DO NOT Update These Files:
 
-- **`docs/architecture/overview.md`** - References the consolidated docs but should remain stable
-- **`docs/SETUP.md`** - Legacy detailed setup guide, redirect users to CONFIG.md instead
-- **`docs/EVENT_LOGGING.md`** - Specific feature documentation, separate from platform docs
+- **`docs/hardware/OLED_DISPLAY_GUIDE.md`** - Hardware integration reference, only update when display tech changes
+- **`docs/pcb_design/`** - PCB design documentation, separate concern
+- **`docs/solar-monitor/`** - Solar-specific documentation
 - **Any other documentation files** - Changes should go in the 3 primary files above
 
 ## Update Strategy by Change Type:

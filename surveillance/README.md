@@ -110,7 +110,7 @@ pio device monitor -e esp32-s3-devkitc-1
 1. **Triple-reset detection**: Reset device 3 times within 2 seconds to enter config portal
 2. **Fallback AP**: If WiFi disconnects for 60+ seconds, fallback AP starts automatically
 3. Connect to AP: `Cam-[DeviceName]-Fallback` or `ESP32-CAM-Config`
-4. Open browser to `192.168.4.1`
+4. Open browser to the WiFiManager captive portal (e.g., `esp32-cam.local`)
 5. Configure WiFi credentials
 6. Device saves settings and connects
 

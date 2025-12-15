@@ -368,7 +368,7 @@ ESP32 VIN ←────────── 5V from converter
 ### WiFi Configuration
 
 - **Initial Setup:** Connect to "ESP-Setup" AP on first boot or after double-reset
-- **Portal URL:** http://192.168.4.1
+- **Portal:** WiFiManager captive portal (device-hostname.local)
 - **Double Reset:** Reset device twice within 3 seconds to enter config mode
 - **Configuration:** WiFi credentials, device name, InfluxDB settings
 

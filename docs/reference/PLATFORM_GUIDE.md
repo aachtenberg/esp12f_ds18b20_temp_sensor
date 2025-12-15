@@ -2,7 +2,7 @@
 
 ## Overview
 
-Self-hosted IoT platform supporting temperature sensors (ESP8266/ESP32), solar monitoring (ESP32), and surveillance cameras (ESP32-S3) with WiFiManager portal configuration, InfluxDB time-series storage, MQTT integration, and Grafana visualization.
+Self-hosted IoT platform supporting temperature sensors (ESP8266/ESP32), solar monitoring (ESP32), and surveillance cameras (ESP32-S3). Devices publish data via MQTT to a central broker, with optional downstream integration to InfluxDB v3 and Grafana visualization. All devices configured via WiFiManager portal (zero hardcoded credentials).
 
 ## Quick Start
 
@@ -20,7 +20,7 @@ Self-hosted IoT platform supporting temperature sensors (ESP8266/ESP32), solar m
 
 ### 2. Configure via WiFiManager
 1. Device creates AP "ESP-Setup" (password: "configure")
-2. Connect and navigate to http://192.168.4.1
+2. Connect and open the WiFiManager captive portal (e.g., http://esp-setup.local)
 3. Enter WiFi credentials and device name
 4. Device connects and starts sending data
 
@@ -32,52 +32,78 @@ Self-hosted IoT platform supporting temperature sensors (ESP8266/ESP32), solar m
 ## Architecture
 
 ```
-┌────────────────────────┐    ┌────────────────────────┐
-│   Temperature Sensor   │    │      Solar Monitor      │
-│   ESP8266/ESP32        │    │        ESP32            │
-│  - DS18B20 sensor     │    │  - SmartShunt (UART2)  │
-│  - WiFiManager portal │    │  - MPPT1 (UART1)      │
-│  - Event logging      │    │  - MPPT2 (SoftSerial)  │
-└────────────┬───────────┘    └────────────┬───────────┘
-            │                              │
-            │ InfluxDB Line Protocol           │
-            │ POST /api/v2/write               │
-            └─────────────┬────────────────────┘
-                         │
-                         ↓
-    ┌────────────────────────────────────────────────┐
-    │              Raspberry Pi 4                   │
-    │         Docker Infrastructure                 │
-    │                                              │
-    │  ┌────────────────┐   ┌────────────────┐  │
-    │  │   InfluxDB 2.x     │   │   Grafana 12.x   │  │
-    │  │  Port: 8086       │   │  Port: 3000     │  │
-    │  │  - sensor_data    │   │  - Dashboards   │  │
-    │  │  - device_events  │   │  - Alerts       │  │
-    │  │  - Time-series DB │   │  - Event logs   │  │
-    │  └────────────┬───────┘   └────────────────┘  │
-    │           │            Flux queries            │
-    └───────────┴───────────────────────────────────┘
+┌────────────────────────┐    ┌────────────────────────┐    ┌────────────────────────┐
+│   Temperature Sensor   │    │      Solar Monitor      │    │  Surveillance Camera   │
+│   ESP8266/ESP32        │    │        ESP32            │    │      ESP32-S3          │
+│  - DS18B20 sensor      │    │  - SmartShunt (UART2)  │    │  - OV2640 camera       │
+│  - MQTT publisher      │    │  - MPPT1 (UART1)       │    │  - MQTT publisher      │
+│  - WiFiManager portal  │    │  - MPPT2 (SoftSerial)  │    │  - WiFi/SD card        │
+└────────────┬───────────┘    └────────────┬───────────┘    └────────────┬───────────┘
+            │                              │                              │
+            │ MQTT JSON                    │ MQTT JSON                    │ MQTT JSON
+            │ esp-sensor-hub/*/temperature │ esp-solar-hub/*/status       │ esp-camera/*/status
+            └─────────────┬────────────────┼──────────────────────────────┘
+                         │                │
+                         ↓                ↓
+    ┌──────────────────────────────────────────────────────────────┐
+    │              MQTT Broker (Mosquitto)                         │
+    │              your.mqtt.broker.com:1883                      │
+    │         Topic subscriptions: esp-*/#                         │
+    └──────────┬──────────────────────────┬──────────┬─────────────┘
+              │                          │          │
+              ↓                          ↓          ↓
+    ┌──────────────────────┐   ┌──────────────────────┐   ┌──────────────────────┐
+    │   Raspberry Pi 4     │   │  Telegraf Bridge     │   │   Grafana 12.x       │
+    │  Docker Infrastructure                        │   │   Port: 3000         │
+    │                      │   │ (MQTT → InfluxDB)   │   │   - Dashboards       │
+    │  ┌────────────────┐  │   └──────────────┬──────┘   │   - Alerts           │
+    │  │  InfluxDB 3.x  │  │                 │          │   - Event logs       │
+    │  │  Port: 8086    │  │                 ↓          └──────────────────────┘
+    │  │  - sensor_data │  │       ┌──────────────────┐
+    │  │  - device_events│  │       │   InfluxDB 3.x   │
+    │  │  - Time-series  │  │       │   (optional)     │
+    │  └────────────────┘  │       └──────────────────┘
+    └──────────────────────┘
 ```
 
+**Data Flow**:
+1. Devices connect to WiFi and MQTT broker
+2. Publish hierarchical JSON payloads every 30 seconds
+3. MQTT broker persists retained status messages
+4. Optional Telegraf bridge maps MQTT → InfluxDB v3
+5. Grafana queries InfluxDB or MQTT directly for dashboards
+
 ## Configuration
+
+### MQTT Broker Setup
+Devices publish to a central MQTT broker:
+```
+MQTT_BROKER: your.mqtt.broker.com (e.g., mosquitto.local or LAN hostname)
+MQTT_PORT: 1883
+MQTT_USER: (optional, empty by default)
+MQTT_PASSWORD: (optional, empty by default)
+```
+
+### Temperature Sensor Topic Structure
+```
+esp-sensor-hub/{device_name}/temperature
+└─ JSON payload: {"device": "...", "chip_id": "...", "timestamp": ..., "celsius": ..., "fahrenheit": ...}
+
+esp-sensor-hub/{device_name}/status (retained)
+└─ JSON payload: {"device": "...", "uptime_seconds": ..., "wifi_connected": true, "wifi_rssi": ..., "free_heap": ...}
+
+esp-sensor-hub/{device_name}/events
+└─ JSON payload: {"event": "boot|wifi_disconnect|sensor_error", "severity": "info|warning|error", ...}
+```
 
 ### Secrets Setup
 Create `temperature-sensor/include/secrets.h` (excluded from git):
 ```cpp
-static const char* INFLUXDB_URL = "http://192.168.1.100:8086";
-static const char* INFLUXDB_TOKEN = "your-influxdb-token";  
-static const char* INFLUXDB_ORG = "your-org";
-static const char* INFLUXDB_BUCKET = "sensor_data";
+static const char* MQTT_BROKER = "your.mqtt.broker.com";  // e.g., "mosquitto.local" or LAN hostname
+static const int MQTT_PORT = 1883;
+static const char* MQTT_USER = "";        // Leave empty if no auth
+static const char* MQTT_PASSWORD = "";    // Leave empty if no auth
 ```
-
-### Data Model
-**InfluxDB Measurements**:
-- `sensor_data`: Temperature readings, solar metrics, battery data
-- `device_events`: Boot, WiFi connect/disconnect, error events
-
-**Common Tags**: device_name, project_type (temp/solar), location  
-**Common Fields**: temperature_c, voltage, current, power, rssi, heap_free
 
 ## Project Support
 
@@ -118,7 +144,7 @@ python3 scripts/flash_multiple.py --project solar
 platformio device monitor -b 115200
 
 # WiFiManager portal access
-# Connect to "ESP-Setup" AP → http://192.168.4.1
+# Connect to "ESP-Setup" AP → WiFiManager captive portal (e.g., esp-setup.local)
 ```
 
 ### Data Verification
@@ -150,7 +176,7 @@ sudo docker logs grafana
 
 ### WiFiManager Portal Configuration
 - Eliminates hardcoded WiFi credentials
-- Captive portal setup at 192.168.4.1
+- Captive portal available via WiFiManager (device-hostname.local)
 - Device name configuration via web interface
 - Automatic WiFi reconnection and recovery
 

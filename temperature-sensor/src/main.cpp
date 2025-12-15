@@ -223,12 +223,25 @@ bool ensureMqttConnected() {
   }
 
   if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("[MQTT] WiFi not connected, cannot connect to broker");
     return false;
   }
 
+  Serial.print("[MQTT] Attempting connection to ");
+  Serial.print(MQTT_BROKER);
+  Serial.print(":");
+  Serial.println(MQTT_PORT);
+  
   String clientId = String(deviceName) + "-" + chipId;
+  Serial.print("[MQTT] Client ID: ");
+  Serial.println(clientId);
+  
   bool connected = mqttClient.connect(clientId.c_str(), MQTT_USER, MQTT_PASSWORD);
-  if (!connected) {
+  if (connected) {
+    Serial.println("[MQTT] Connected to broker successfully");
+  } else {
+    Serial.print("[MQTT] Connection failed, state: ");
+    Serial.println(mqttClient.state());
     metrics.mqttPublishFailures++;
   }
   return connected;
@@ -236,16 +249,27 @@ bool ensureMqttConnected() {
 
 bool publishJson(const String& topic, JsonDocument& doc, bool retain = false) {
   if (!ensureMqttConnected()) {
+    Serial.print("[MQTT] Not connected, skipping publish to ");
+    Serial.println(topic);
     return false;
   }
 
   String payload;
   serializeJson(doc, payload);
 
+  Serial.print("[MQTT] Publishing to ");
+  Serial.print(topic);
+  Serial.print(" (retain=");
+  Serial.print(retain ? "true" : "false");
+  Serial.print(") payload: ");
+  Serial.println(payload);
+  
   bool ok = mqttClient.publish(topic.c_str(), payload.c_str(), retain);
   if (ok) {
+    Serial.println("[MQTT] Publish successful");
     metrics.lastSuccessfulMqttPublish = millis();
   } else {
+    Serial.println("[MQTT] Publish failed");
     metrics.mqttPublishFailures++;
   }
   return ok;
@@ -268,9 +292,15 @@ void publishEvent(const String& eventType, const String& message, const String& 
 
 void publishTemperature() {
   if (!isValidTemperature(temperatureC)) {
+    Serial.println("[TEMP] Invalid temperature reading, skipping publish");
     return;
   }
 
+  Serial.print("[TEMP] Building temperature payload: C=");
+  Serial.print(temperatureC);
+  Serial.print(" F=");
+  Serial.println(temperatureF);
+  
   StaticJsonDocument<256> doc;
   doc["device"] = deviceName;
   doc["chip_id"] = chipId;
@@ -281,6 +311,20 @@ void publishTemperature() {
 }
 
 void publishStatus() {
+  Serial.println("[STATUS] Building status payload");
+  Serial.print("  WiFi: ");
+  Serial.println(WiFi.status() == WL_CONNECTED ? "Connected" : "Disconnected");
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.print("  SSID: ");
+    Serial.print(WiFi.SSID());
+    Serial.print(" RSSI: ");
+    Serial.println(WiFi.RSSI());
+  }
+  Serial.print("  Free heap: ");
+  Serial.println(ESP.getFreeHeap());
+  Serial.print("  Uptime: ");
+  Serial.println((millis() - metrics.bootTime) / 1000);
+  
   StaticJsonDocument<256> doc;
   doc["device"] = deviceName;
   doc["chip_id"] = chipId;

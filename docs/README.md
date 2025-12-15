@@ -31,9 +31,8 @@ docs/
 │   ├── PLATFORM_GUIDE.md          ← **START HERE** - Main documentation  
 │   ├── CONFIG.md                  ← Configuration & troubleshooting
 │   └── COPILOT_INSTRUCTIONS.md    ← Development guidelines
-├── 📊 EVENT_LOGGING.md            ← Device monitoring system
-├── 🔧 architecture/
-│   └── CODE_STRUCTURE.md          ← Technical implementation  
+├── � hardware/
+│   └── OLED_DISPLAY_GUIDE.md      ← Optional OLED display integration
 ├── 🔌 pcb_design/                ← Hardware design files
 └── ☀️ solar-monitor/              ← Solar project docs
 ```

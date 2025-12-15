@@ -18,14 +18,19 @@
 
 // Set to 1 to enable OLED display, 0 to disable
 // When disabled, stub functions are used to prevent crashes if hardware is not connected
-#define OLED_ENABLED 1
+#define OLED_ENABLED 0
 
 #if OLED_ENABLED
 
 // Display Hardware Configuration
 #define DISPLAY_I2C_ADDRESS 0x3C
+#if defined(ESP8266)
+#define DISPLAY_SDA_PIN 0   // GPIO 0 (D3) on ESP8266
+#define DISPLAY_SCL_PIN 5   // GPIO 5 (D1) on ESP8266
+#else
 #define DISPLAY_SDA_PIN 21  // GPIO 21 (ESP32 standard I2C SDA)
 #define DISPLAY_SCL_PIN 22  // GPIO 22 (ESP32 standard I2C SCL)
+#endif
 
 // Display Update Timing
 #define DISPLAY_UPDATE_INTERVAL 1000  // milliseconds
