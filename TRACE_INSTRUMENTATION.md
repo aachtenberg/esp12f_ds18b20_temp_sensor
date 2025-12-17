@@ -1,25 +1,58 @@
 # MQTT Trace Instrumentation Implementation
 
 ## Overview
-This document describes the trace ID instrumentation added to all MQTT payloads in the temperature-sensor and surveillance projects.
+This document describes the trace ID instrumentation added to all MQTT payloads in the temperature-sensor and surveillance projects. The implementation includes both backward-compatible trace fields and W3C Trace Context (traceparent) headers for distributed tracing.
 
 ## Purpose
-Enable end-to-end request tracking and message correlation across MQTT topics and backend systems using unique trace IDs and sequence numbers.
+Enable end-to-end request tracking and message correlation across MQTT topics and backend systems using:
+- Unique trace IDs (UUID format for backward compatibility)
+- W3C traceparent headers (for distributed tracing standards compliance)
+- Sequence numbers (for message ordering)
+- Span IDs (for distributed tracing)
 
 ## Implementation Details
 
-### Trace ID Generation
-- **Strategy**: Single UUID per device boot (Option A)
-- **Format**: UUID-like string (36 characters)
-  - ESP32: `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx` (derived from EfuseMac + millis())
-  - ESP8266: `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx` (derived from ChipID + millis())
+### Trace ID Generation (Dual Format)
+
+The trace system generates trace IDs in two formats simultaneously:
+
+1. **UUID Format (Backward Compatibility)**
+   - Format: `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx` (36 characters)
+   - Used for: Legacy backend systems, readable logs
+   - Generation:
+     - ESP32: Derived from EfuseMac + millis()
+     - ESP8266: Derived from ChipID + millis()
+
+2. **32-Character Hex Format (W3C Standard)**
+   - Format: `xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx` (32 hex characters, no dashes)
+   - Used for: W3C traceparent header, distributed tracing systems
+   - Generation:
+     - ESP32: First 16 chars from EfuseMac, next 16 from boot_ms
+     - ESP8266: Padded combination of ChipID and boot_ms
+
 - **Persistence**: Constant per boot session; regenerated on device restart
 - **No External Dependencies**: Uses only Arduino.h and standard C++ (sstream)
+
+### W3C Traceparent Header
+- **Format**: `00-{trace_id}-{span_id}-01`
+  - `00`: Version (W3C Trace Context v1.0)
+  - `{trace_id}`: 32 hex character trace identifier
+  - `{span_id}`: 16 hex character span identifier
+  - `01`: Trace flags (sampled; 01 = recorded, 00 = not recorded)
+- **Example**: `00-a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6-f7b8d9c0e1a2b3c4-01`
+- **Standard**: Compliant with [W3C Trace Context v1.0](https://www.w3.org/TR/trace-context/)
+
+### Span ID Generation
+- **Type**: 16 hex character string
+- **Format**: `xxxxxxxxxxxxxxxx` (derived from chip_id XOR boot_ms)
+- **Purpose**: Identifies individual operations within a trace
+- **Uniqueness**: Combined with trace_id, creates globally unique span identifier
 
 ### Sequence Numbering
 - **Type**: Monotonic unsigned 32-bit counter
 - **Range**: 1 to 4,294,967,295 per boot
 - **Reset**: Counter resets to 0 on device reboot
+- **Increment**: Increments on every `getSequenceNumber()` call
 - **Overflow**: At 1 message/second, counter runs for ~136 years before overflow
 
 ### Schema Versioning
@@ -59,6 +92,7 @@ surveillance/src/main.cpp
   "device": "temp-sensor-01",
   "chip_id": "a1b2c3d4",
   "trace_id": "a1b2c3d4-1a2b-3c4d-5e6f-7a8b9c0d1e2f",
+  "traceparent": "00-a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6-f7b8d9c0e1a2b3c4-01",
   "seq_num": 1,
   "schema_version": 1,
   "timestamp": 1234567890,
@@ -73,6 +107,7 @@ surveillance/src/main.cpp
   "device": "esp32-cam-01",
   "chip_id": "f1e2d3c4",
   "trace_id": "f1e2d3c4-2b3c-4d5e-6f7a-8b9c0d1e2f3a",
+  "traceparent": "00-f1e2d3c42b3c4d5e6f7a8b9c0d1e2f3a-4f7b8d9c0e1a2b3c-01",
   "seq_num": 145,
   "schema_version": 1,
   "location": "surveillance",
@@ -151,6 +186,70 @@ Get human-readable trace identifier.
 - Useful for logs and debugging
 - Example: `"a1b2c3d4-1a2b-3c4d-5e6f-7a8b9c0d1e2f:42"`
 
+#### `std::string getTraceparent()`
+Get the W3C traceparent header for distributed tracing.
+- Returns: String in W3C traceparent format `00-{trace_id}-{span_id}-01`
+- Compliant with [W3C Trace Context v1.0](https://www.w3.org/TR/trace-context/)
+- Safe to call multiple times, same value for entire boot session
+- Example: `"00-a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6-f7b8d9c0e1a2b3c4-01"`
+
+**Use in MQTT payload:**
+```cpp
+JsonDocument doc;
+doc["trace_id"] = Trace::getTraceId();        // UUID format: for backward compatibility
+doc["traceparent"] = Trace::getTraceparent(); // W3C format: for distributed tracing
+doc["seq_num"] = Trace::getSequenceNumber();
+```
+
+#### `std::string getSpanId()`
+Get the span ID for distributed tracing.
+- Returns: 16-character hex string
+- Unique per device boot, same for all messages in session
+- Used in W3C traceparent header
+- Example: `"f7b8d9c0e1a2b3c4"`
+
+## W3C Trace Context Integration
+
+The W3C traceparent header is included in all MQTT payloads for compatibility with distributed tracing systems like:
+- [OpenTelemetry](https://opentelemetry.io/)
+- [Jaeger](https://www.jaegertracing.io/)
+- [Zipkin](https://zipkin.io/)
+- [DataDog](https://www.datadoghq.com/)
+- [New Relic](https://newrelic.com/)
+
+### Traceparent Format Breakdown
+For example: `00-a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6-f7b8d9c0e1a2b3c4-01`
+
+| Component | Format | Description | Example |
+|-----------|--------|-------------|---------|
+| Version | `00` | W3C Trace Context v1.0 | `00` |
+| Trace-ID | 32 hex chars | Unique trace identifier | `a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6` |
+| Span-ID | 16 hex chars | Current span identifier | `f7b8d9c0e1a2b3c4` |
+| Trace-Flags | `01` or `00` | `01`=recorded, `00`=not recorded | `01` (always sampled) |
+
+### Backend Integration
+
+To use traceparent in your backend:
+
+```python
+# Python example with OpenTelemetry
+from opentelemetry import trace
+from opentelemetry.trace import set_span_in_context
+
+def process_mqtt_message(payload):
+    # Extract traceparent from MQTT payload
+    traceparent = payload.get("traceparent")
+    
+    # Parse and propagate context
+    ctx = TraceContextPropagator().extract({"traceparent": traceparent})
+    
+    with trace.get_tracer(__name__).start_as_current_span(
+        "process_sensor_reading", context=ctx
+    ) as span:
+        # Process the message with trace context
+        process_sensor_data(payload)
+```
+
 ## Integration Patterns
 
 ### Adding to Existing Publish Functions
@@ -169,12 +268,12 @@ Get human-readable trace identifier.
    }
    ```
 
-3. **Add fields to payload:**
+3. **Add fields to payload (both backward-compatible and W3C):**
    ```cpp
    JsonDocument doc;
    doc["device"] = deviceName;
-   // ... existing fields
-   doc["trace_id"] = Trace::getTraceId();
+   doc["trace_id"] = Trace::getTraceId();        // UUID format for backward compatibility
+   doc["traceparent"] = Trace::getTraceparent(); // W3C Trace Context header
    doc["seq_num"] = Trace::getSequenceNumber();
    doc["schema_version"] = 1;
    // ... rest of payload
