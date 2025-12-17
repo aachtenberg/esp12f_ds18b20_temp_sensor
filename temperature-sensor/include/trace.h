@@ -38,6 +38,19 @@ namespace Trace {
    * @return String in format "trace_id:seq_num"
    */
   std::string getTraceIdentifier();
+
+  /**
+   * @brief Get the W3C traceparent header value for this message.
+   * Format: 00-{trace_id}-{span_id}-01
+   * @return String in W3C traceparent format
+   */
+  std::string getTraceparent();
+
+  /**
+   * @brief Get the span ID (16 hex characters) for distributed tracing.
+   * @return String containing the span ID
+   */
+  std::string getSpanId();
 }
 
 #endif // TRACE_H

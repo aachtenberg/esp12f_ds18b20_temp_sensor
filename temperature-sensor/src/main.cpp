@@ -281,6 +281,7 @@ void publishEvent(const String& eventType, const String& message, const String& 
   doc["device"] = deviceName;
   doc["chip_id"] = chipId;
   doc["trace_id"] = Trace::getTraceId();
+  doc["traceparent"] = Trace::getTraceparent();
   doc["seq_num"] = Trace::getSequenceNumber();
   doc["schema_version"] = 1;
   doc["event"] = eventType;
@@ -309,6 +310,7 @@ void publishTemperature() {
   doc["device"] = deviceName;
   doc["chip_id"] = chipId;
   doc["trace_id"] = Trace::getTraceId();
+  doc["traceparent"] = Trace::getTraceparent();
   doc["seq_num"] = Trace::getSequenceNumber();
   doc["schema_version"] = 1;
   doc["timestamp"] = millis() / 1000;
@@ -336,6 +338,7 @@ void publishStatus() {
   doc["device"] = deviceName;
   doc["chip_id"] = chipId;
   doc["trace_id"] = Trace::getTraceId();
+  doc["traceparent"] = Trace::getTraceparent();
   doc["seq_num"] = Trace::getSequenceNumber();
   doc["schema_version"] = 1;
   doc["timestamp"] = millis() / 1000;

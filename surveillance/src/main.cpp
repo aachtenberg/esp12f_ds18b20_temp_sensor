@@ -2320,6 +2320,7 @@ void publishMetricsToMQTT() {
     doc["device"] = deviceName;
     doc["chip_id"] = deviceChipId;
     doc["trace_id"] = Trace::getTraceId();
+    doc["traceparent"] = Trace::getTraceparent();
     doc["seq_num"] = Trace::getSequenceNumber();
     doc["schema_version"] = 1;
     doc["location"] = "surveillance";
@@ -2351,6 +2352,7 @@ void logEventToMQTT(const char* event, const char* severity) {
     doc["device"] = deviceName;
     doc["chip_id"] = deviceChipId;
     doc["trace_id"] = Trace::getTraceId();
+    doc["traceparent"] = Trace::getTraceparent();
     doc["seq_num"] = Trace::getSequenceNumber();
     doc["schema_version"] = 1;
     doc["location"] = "surveillance";
