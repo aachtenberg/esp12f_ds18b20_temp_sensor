@@ -367,9 +367,10 @@ ESP32 VIN ←────────── 5V from converter
 
 ### WiFi Configuration
 
-- **Initial Setup:** Connect to "ESP-Setup" AP on first boot or after double-reset
-- **Portal:** WiFiManager captive portal (device-hostname.local)
+- **Initial Setup:** Connect to "Solar-Monitor-Setup" AP on first boot or after double-reset
+- **Portal:** WiFiManager captive portal at `http://192.168.4.1`
 - **Double Reset:** Reset device twice within 3 seconds to enter config mode
+  - Uses ESP_DoubleResetDetector library (RTC memory persistence)
 - **Configuration:** WiFi credentials, device name, InfluxDB settings
 
 ### OLED Display Pages (if enabled)
@@ -447,11 +448,12 @@ The OLED cycles through multiple pages showing:
 
 **Symptoms:** Cannot connect to WiFi, frequent disconnections
 **Checks:**
-- Double-reset to enter WiFiManager portal
-- Verify WiFi credentials are correct
+- Double-reset within 3 seconds to enter WiFiManager portal
+- Portal AP: "Solar-Monitor-Setup" at `http://192.168.4.1`
+- Verify WiFi credentials are correct (case-sensitive)
 - Check WiFi signal strength (RSSI in system API)
 - Ensure 2.4GHz WiFi is enabled (ESP32 doesn't support 5GHz)
-- Check router allows new devices
+- Check router allows new devices and DHCP has available leases
 
 ### Web Server Not Accessible
 

@@ -23,4 +23,35 @@ static const unsigned long TEMPERATURE_READ_INTERVAL_MS = 30000;  // Read temper
   static const int HTTP_TIMEOUT_MS = 10000;  // 10s timeout for ESP32
 #endif
 
+// =============================================================================
+// LOW-POWER CONFIGURATION (Per-Board Profiles)
+// =============================================================================
+
+// CPU Frequency (MHz) - Lower freq reduces power consumption
+#ifdef ESP8266
+  #define CPU_FREQ_MHZ 80  // ESP8266: 80 MHz (vs 160 MHz default)
+#elif defined(ESP32) || defined(ESP32S3)
+  #define CPU_FREQ_MHZ 80  // ESP32/S3: 80 MHz (vs 240 MHz default)
+#endif
+
+// WiFi Power Save Mode
+#ifdef ESP8266
+  #define WIFI_PS_MODE WIFI_LIGHT_SLEEP  // ESP8266: Light sleep mode
+#elif defined(ESP32) || defined(ESP32S3)
+  #define WIFI_PS_MODE WIFI_PS_MIN_MODEM // ESP32/S3: Minimum modem sleep
+#endif
+
+// OLED Display Gating (1 = gate display, 0 = always on)
+// Battery-powered devices: gate to 10s on / 50s off per minute (saves ~60% OLED power)
+// Mains-powered devices: always on for monitoring
+#ifdef BATTERY_POWERED
+  #define OLED_GATE_ENABLED 1             // Gate OLED for battery operation
+  #define OLED_ON_DURATION_MS 10000       // Display on for 10 seconds
+  #define OLED_CYCLE_DURATION_MS 60000    // Full cycle is 60 seconds (on 10s, off 50s)
+  #define HTTP_SERVER_ENABLED 0           // Disable HTTP server for battery
+#else
+  #define OLED_GATE_ENABLED 0             // Always on for mains-powered
+  #define HTTP_SERVER_ENABLED 1           // Enable HTTP server for mains-powered
+#endif
+
 #endif // DEVICE_CONFIG_H

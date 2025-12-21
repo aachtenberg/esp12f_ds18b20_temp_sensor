@@ -1,5 +1,49 @@
 # GitHub Copilot Documentation Guidelines
 
+## ⚠️ MANDATORY: Read First, Code Second
+
+**Before making ANY code changes or suggesting modifications:**
+
+### Required Reading Order:
+1. **Read relevant documentation first**:
+   - `/docs/reference/PLATFORM_GUIDE.md` - Understand architecture and platform
+   - `/docs/reference/CONFIG.md` - Review configuration patterns
+   - Project-specific READMEs (e.g., `surveillance/README.md`)
+   - `memory-bank/activeContext.md` - Current project state
+   - `memory-bank/progress.md` - Recent changes and decisions
+
+2. **Read the actual code**:
+   - Use `read_file` to examine files you'll modify
+   - Use `grep_search` or `semantic_search` to understand patterns
+   - Review related files (headers, configs, dependencies)
+   - Check existing implementations before creating new ones
+
+3. **Understand platform-specific requirements**:
+   - ESP32-S3 vs ESP32 vs ESP8266 differences
+   - NVS vs RTC memory considerations
+   - Hardware-specific configurations
+
+### ❌ Do NOT:
+- Make changes based on assumptions or general knowledge
+- Modify code without reading existing implementation
+- Ignore platform-specific instructions in documentation
+- Create new patterns when existing patterns should be followed
+- Skip reading memory-bank context files
+- **Copy secrets.h.example to secrets.h without checking if secrets.h already exists**
+- **Overwrite existing secrets with example values**
+
+### ✅ DO:
+- Read documentation thoroughly before suggesting changes
+- Examine existing code patterns and follow them
+- Check memory-bank for recent decisions and context
+- Ask clarifying questions if documentation is unclear
+- Reference specific documentation sections in your responses
+- **Always check if `secrets.h` exists before suggesting to copy from `secrets.h.example`**
+- **Preserve existing secrets.h values when updating credentials**
+- **Only use `secrets.h.example` as a template for new projects or missing files**
+
+---
+
 ## Critical: Consolidated Documentation Structure
 
 **The project documentation has been consolidated to eliminate redundancy and improve maintainability.**
@@ -123,3 +167,102 @@
 **File Consolidation Completed**: November 24, 2025  
 **Previous Files Removed**: COPILOT_INSTRUCTIONS.md, PROJECT_SUMMARY.md, SECRETS_SETUP.md, COMPLETION_SUMMARY.txt  
 **Current Structure**: 3-file focused documentation with clear responsibilities
+
+---
+
+## Platform-Specific Implementation Notes
+
+### ESP32-S3 Reset Detection (December 2025)
+
+**Critical Implementation Detail**: ESP32-S3 architecture requires NVS (Non-Volatile Storage) for reset detection, **not** RTC memory.
+
+#### Why NVS is Required for ESP32-S3
+- RTC fast memory (RTC_NOINIT_ATTR) does **not** persist reliably across hardware resets on ESP32-S3
+- This differs from ESP32 and ESP8266 where RTC memory works correctly for reset detection
+- NVS provides guaranteed persistence across all reset types (hardware, software, power cycle)
+
+#### Implementation Pattern
+```cpp
+#include <Preferences.h>
+
+Preferences resetPrefs;
+
+void checkResetCounter() {
+  resetPrefs.begin("reset", false);  // namespace "reset", read-write mode
+  
+  // NVS keys used:
+  // - crash_flag: uint32_t (0xDEADBEEF when in crash loop)
+  // - crash_cnt: uint32_t (incomplete boot counter)
+  // - reset_cnt: uint32_t (reset counter within detection window)
+  // - window: uint64_t (reset window start time in milliseconds)
+  
+  uint32_t resetCount = resetPrefs.getUInt("reset_cnt", 0);
+  uint64_t resetWindow = resetPrefs.getULong64("window", 0);
+  
+  // ... reset detection logic ...
+  
+  resetPrefs.putUInt("reset_cnt", newCount);
+  resetPrefs.putULong64("window", newWindow);
+  resetPrefs.end();
+}
+```
+
+#### Key Configuration Constants
+```cpp
+// In device_config.h
+#define RESET_DETECT_TIMEOUT 2000      // 2 second window for reset detection
+#define RESET_COUNT_THRESHOLD 3         // 3 resets to trigger config portal
+#define CRASH_LOOP_THRESHOLD 5          // 5 incomplete boots to trigger portal
+#define CRASH_LOOP_MAGIC 0xDEADBEEF     // Magic number for crash detection
+```
+
+#### Critical Setup Timing
+- **Must** call `checkResetCounter()` at the **very start** of `setup()` before any delays
+- Even a 2-second Serial.begin() delay can prevent proper reset detection
+- Early execution ensures the reset counter starts immediately on boot
+
+```cpp
+void setup() {
+  checkResetCounter();  // FIRST thing in setup() - before any delays
+  
+  Serial.begin(115200);
+  delay(2000);  // Now safe to delay after reset check
+  // ... rest of setup ...
+}
+```
+
+#### WiFi Mode for Config Portal
+- Use `WIFI_AP_STA` mode, not `WIFI_STA` alone
+- Allows simultaneous Access Point (config portal) and Station (network connection) operation
+- Config portal accessible at: **192.168.4.1**
+- Main application accessible at Station IP (DHCP assigned)
+
+```cpp
+void setupWiFi() {
+  WiFi.mode(WIFI_AP_STA);  // Critical for simultaneous AP and STA
+  // ... WiFiManager setup ...
+}
+```
+
+#### Platform Selection Guide
+- **ESP32-S3**: Always use NVS (Preferences library) - required for reliability
+- **ESP32 (original)**: Can use RTC (ESP_DoubleResetDetector) or NVS - both work
+- **ESP8266**: Can use RTC (ESP_DoubleResetDetector) or NVS - both work
+- **Multi-platform projects**: Use NVS for consistency across all ESP32 variants
+
+#### Files to Reference
+- **Implementation**: `surveillance/src/main.cpp` - Complete NVS implementation with `checkResetCounter()` and `clearCrashLoop()`
+- **Configuration**: `surveillance/include/device_config.h` - Reset detection constants
+- **Documentation**: `surveillance/README.md` - Detailed reset detection section with platform notes
+- **Copilot Notes**: `surveillance/.github/copilot-instructions.md` - Additional implementation details
+
+#### Verification Steps
+1. Flash firmware to ESP32-S3
+2. Open serial monitor (115200 baud)
+3. Press reset button 3 times within 2 seconds
+4. Should see: `[RESET] Reset count: 1/3`, `[RESET] Reset count: 2/3`, `[RESET] Reset count: 3/3 - Starting portal!`
+5. Config portal should start at 192.168.4.1
+
+**Implementation Completed**: December 2025  
+**Tested On**: Freenove ESP32-S3 WROOM (8MB Flash, 8MB PSRAM)  
+**Status**: Production-ready, fully functional

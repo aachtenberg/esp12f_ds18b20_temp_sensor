@@ -114,7 +114,7 @@ $projectName = if ($ProjectType -eq "solar") { "Solar Monitor" } else { "Tempera
 Write-Host "`n[Step 5/5] Flashing $projectName ($Board)..." -ForegroundColor Yellow
 Write-Host ""
 
-$wslCommand = "cd /home/aachten/PlatformIO/esp12f_ds18b20_temp_sensor && ./scripts/flash_device.sh $ProjectType $Board"
+$wslCommand = "cd /home/`$USER/PlatformIO/esp12f_ds18b20_temp_sensor && ./scripts/flash_device.sh $ProjectType $Board"
 if ($DeviceName) {
     $wslCommand += " '$DeviceName'"
 }
