@@ -1,0 +1,14 @@
+{
+	"folders": [
+		{
+			"path": "."
+		},
+		{
+			"path": "../raspberry-pi-docker"
+		},
+		{
+			"path": "../camera-dashboard"
+		}
+	],
+	"settings": {}
+}

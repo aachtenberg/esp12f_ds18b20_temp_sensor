@@ -20,7 +20,9 @@ PlatformIO firmware for ESP32-based solar monitoring using Victron VE.Direct pro
    pio run --target upload
    pio device monitor
    ```
-4. **Configure WiFi**: On first boot (or double-reset within 3 seconds), connect to the "Solar-Monitor-Setup" AP and configure WiFi via captive portal
+4. **Configure WiFi**: On first boot (or double-reset within 3 seconds), connect to the "Solar-Monitor-Setup" AP
+5. Open browser to `http://192.168.4.1` for WiFiManager captive portal
+6. Configure WiFi credentials and device settings
 
 ## API Endpoints
 

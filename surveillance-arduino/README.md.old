@@ -1,0 +1,243 @@
+# ESP32-S3 Surveillance - Arduino CLI Build
+
+This directory contains the **Arduino CLI** build system for the ESP32-S3 Surveillance project, optimized for WSL2, Linux, and CI/CD environments.
+
+## 🚀 Quick Start
+
+### For Freenove ESP32-S3 WROOM (Recommended)
+```bash
+./COMPILE_ESP32S3.sh
+```
+
+### For AI Thinker ESP32-CAM (Legacy)
+```bash
+./bin/arduino-cli compile --fqbn esp32:esp32:esp32cam ESP32CAM_Surveillance
+```
+
+## 📁 Directory Structure
+
+```
+surveillance-arduino/
+├── bin/
+│   └── arduino-cli          # Arduino CLI v1.4.0 binary
+├── ESP32CAM_Surveillance/   # Main project files
+│   ├── ESP32CAM_Surveillance.ino  # 2700+ lines - complete sketch
+│   ├── camera_config.cpp          # Camera initialization
+│   ├── camera_config.h
+│   ├── device_config.h            # Device settings
+│   ├── secrets.h                  # WiFi/MQTT credentials (EDIT THIS!)
+│   └── README.md                  # User guide
+├── COMPILE.sh               # Quick compile for ESP32-CAM
+├── COMPILE_ESP32S3.sh       # Quick compile for ESP32-S3
+├── ARDUINO_CLI_SETUP.md     # Complete setup & USB/IP guide
+├── BUILD_SYSTEMS.md         # Comparison of build systems
+└── README.md                # This file
+```
+
+## ⚙️ Requirements
+
+### System Requirements
+- **WSL2** (Windows Subsystem for Linux 2) or native Linux
+- **Arduino CLI** v1.4.0+ (included in `./bin/`)
+- **ESP32 Core** v3.3.3 (installed)
+
+### Installed Libraries
+- WiFiManager 2.0.17
+- ArduinoJson 7.4.2
+- PubSubClient 2.8.0
+- ESPAsyncWebServer 3.6.0
+- AsyncTCP 3.3.2
+
+All libraries are pre-installed and ready to use!
+
+## 🔧 Configuration
+
+### 1. Edit Credentials
+
+Open [ESP32CAM_Surveillance/secrets.h](ESP32CAM_Surveillance/secrets.h) and configure:
+
+```cpp
+#define WIFI_SSID "YourWiFiName"
+#define WIFI_PASSWORD "YourWiFiPassword"
+#define MQTT_SERVER "192.168.1.100"
+#define MQTT_USER "mqtt_username"
+#define MQTT_PASSWORD "mqtt_password"
+```
+
+### 2. Compile
+
+**For ESP32-CAM:**
+```bash
+./COMPILE.sh
+```
+
+**For ESP32 DevKit (testing):**
+```bash
+./COMPILE_DEVKIT.sh
+```
+
+### 3. Upload to Device
+
+**Requires USB/IP setup for WSL2** (see [ARDUINO_CLI_SETUP.md](ARDUINO_CLI_SETUP.md))
+
+**For AI Thinker ESP32-CAM:**
+```bash
+./bin/arduino-cli upload -p /dev/ttyUSB0 --fqbn esp32:esp32:esp32cam ESP32CAM_Surveillance
+```
+
+**For Freenove ESP32-S3 WROOM:**
+```bash
+./bin/arduino-cli upload -p /dev/ttyUSB0 --fqbn esp32:esp32:esp32s3:PartitionScheme=huge_app ESP32CAM_Surveillance
+```
+
+**For ESP32 DevKit (Testing):**
+```bash
+./bin/arduino-cli upload -p /dev/ttyUSB0 --fqbn esp32:esp32:esp32 ESP32CAM_Surveillance
+```
+
+## 📊 Compilation Results
+
+```
+✅ Compilation Successful!
+
+Sketch uses:     1,420,855 bytes (45% of program storage)
+Global variables:   64,924 bytes (19% of dynamic memory)
+Free RAM:          262,756 bytes for local variables
+
+Board: AI Thinker ESP32-CAM (esp32:esp32:esp32cam)
+```
+
+## 🎯 Supported Boards
+
+### Production
+- **AI Thinker ESP32-CAM** (`esp32:esp32:esp32cam`) ✅
+  - OV2640 camera
+  - Flash LED on GPIO 4
+  - SD card via SD_MMC (1-bit mode)
+
+- **Freenove ESP32-S3 WROOM** (`esp32:esp32:esp32s3`) ✅
+  - OV3660 camera (higher resolution)
+  - 8MB PSRAM
+  - SD card via SD_MMC (4-bit mode)
+  - NVS-based triple-reset detection
+
+### Development/Testing
+- **ESP32 Dev Module** (`esp32:esp32:esp32`) ✅
+  - No camera (init fails gracefully)
+  - WiFi/MQTT/web server work normally
+  - Perfect for rapid prototyping
+
+### Compatible
+- DOIT ESP32 DEVKIT V1 (`esp32:esp32:esp32doit-devkit-v1`)
+- ESP32 Wrover Module (`esp32:esp32:esp32wrover`)
+- NodeMCU-32S (`esp32:esp32:nodemcu-32s`)
+
+## 📚 Documentation
+
+| Document | Description |
+|----------|-------------|
+| [ARDUINO_CLI_SETUP.md](ARDUINO_CLI_SETUP.md) | Complete setup guide, USB/IP, WSL2 instructions, ESP32-S3 support |
+| [BUILD_SYSTEMS.md](BUILD_SYSTEMS.md) | Comparison of PlatformIO vs Arduino IDE vs Arduino CLI |
+| [ESP32CAM_Surveillance/README.md](ESP32CAM_Surveillance/README.md) | User guide, features, configuration |
+
+## 🎯 Supported Hardware Summary
+
+| Hardware | Camera | PSRAM | FQBN | Script |
+|----------|--------|-------|------|--------|
+| AI Thinker ESP32-CAM | OV2640 | 4MB | `esp32:esp32:esp32cam` | `./COMPILE.sh` |
+| **Freenove ESP32-S3** | **OV3660** | **8MB** | `esp32:esp32:esp32s3:PartitionScheme=huge_app` | `./COMPILE_ESP32S3.sh` |
+| ESP32 DevKit | None | Varies | `esp32:esp32:esp32` | `./COMPILE_DEVKIT.sh` |
+
+## 🔍 Manual Commands
+
+### Compilation
+```bash
+# ESP32-CAM
+./bin/arduino-cli compile --fqbn esp32:esp32:esp32cam ESP32CAM_Surveillance
+
+# ESP32 DevKit
+./bin/arduino-cli compile --fqbn esp32:esp32:esp32 ESP32CAM_Surveillance
+
+# Verbose output
+./bin/arduino-cli compile --fqbn esp32:esp32:esp32cam ESP32CAM_Surveillance -v
+```
+
+### Upload
+```bash
+# AI Thinker ESP32-CAM (OV2640)
+./bin/arduino-cli upload -p /dev/ttyUSB0 --fqbn esp32:esp32:esp32cam ESP32CAM_Surveillance
+
+# Freenove ESP32-S3 WROOM (OV3660)
+./bin/arduino-cli upload -p /dev/ttyUSB0 --fqbn esp32:esp32:esp32s3:PartitionScheme=huge_app ESP32CAM_Surveillance
+
+# ESP32 DevKit (Testing without camera)
+./bin/arduino-cli upload -p /dev/ttyUSB0 --fqbn esp32:esp32:esp32 ESP32CAM_Surveillance
+```
+
+### Serial Monitor
+```bash
+./bin/arduino-cli monitor -p /dev/ttyUSB0 -c baudrate=115200
+```
+
+### List Boards
+```bash
+./bin/arduino-cli board listall | grep esp32
+```
+
+## 🐛 Troubleshooting
+
+### Compilation Fails
+1. Check that all libraries are installed:
+   ```bash
+   ./bin/arduino-cli lib list
+   ```
+2. Ensure ESPAsyncWebServer and AsyncTCP are in `~/Arduino/libraries/`
+3. Update core if needed:
+   ```bash
+   ./bin/arduino-cli core update-index
+   ./bin/arduino-cli core upgrade esp32:esp32
+   ```
+
+### USB Device Not Found (WSL2)
+See the **USB/IP Setup** section in [ARDUINO_CLI_SETUP.md](ARDUINO_CLI_SETUP.md#wsl2-usb-access-for-uploading-firmware)
+
+### Camera Init Fails on ESP32 DevKit
+This is **expected** - the DevKit doesn't have camera hardware. The code handles this gracefully and all other features work normally.
+
+## 🆚 Why Arduino CLI?
+
+### vs PlatformIO
+- ✅ Lighter weight (no IDE required)
+- ✅ Faster compilation in some cases
+- ✅ Better for CI/CD pipelines
+- ✅ Works great in WSL2
+- ❌ No built-in debugger
+- ❌ Manual library management
+
+### vs Arduino IDE
+- ✅ Command-line automation
+- ✅ Scriptable builds
+- ✅ CI/CD integration
+- ✅ Works in headless environments
+- ❌ No graphical interface
+- ❌ Steeper learning curve for beginners
+
+**Recommendation:** Use Arduino CLI for Linux/WSL2 development and automation, PlatformIO for debugging, Arduino IDE for quick tests.
+
+## 🎓 Learn More
+
+- [Arduino CLI Documentation](https://arduino.github.io/arduino-cli/)
+- [ESP32 Arduino Core](https://github.com/espressif/arduino-esp32)
+- [ESPAsyncWebServer](https://github.com/me-no-dev/ESPAsyncWebServer)
+
+## 📝 Project Info
+
+- **Version**: Compatible with surveillance v1.x
+- **Platform**: ESP32 (Espressif ESP32 Arduino Core)
+- **License**: See parent project
+- **Build System**: Arduino CLI v1.4.0
+- **Last Updated**: 2025-12-20
+
+---
+
+**Ready to build!** 🚀 Just run `./COMPILE.sh` and you're good to go!

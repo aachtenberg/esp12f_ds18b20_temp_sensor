@@ -4,11 +4,13 @@
 #include <PubSubClient.h>
 #include <ArduinoJson.h>
 #include <ESPAsyncWebServer.h>
+#include <ArduinoOTA.h>
 #include <Update.h>
 #include <base64.h>
 #include <LittleFS.h>
 #include <SD_MMC.h>
 #include <SD.h> // For SD card read/write utilities
+#include <Preferences.h>
 #include <esp_system.h>
 #include <driver/sdmmc_host.h>
 #include <sdmmc_cmd.h>
@@ -16,6 +18,7 @@
 #include "camera_config.h"
 #include "device_config.h"
 #include "secrets.h"
+#include "trace.h"
 
 // RTC memory for reset detection and crash loop recovery
 // These survive software resets but are cleared on power loss
@@ -24,10 +27,12 @@ RTC_NOINIT_ATTR uint32_t rtcResetTimestamp;  // Timestamp of last reset
 RTC_NOINIT_ATTR uint32_t rtcCrashLoopFlag;   // Magic number if boot incomplete
 RTC_NOINIT_ATTR uint32_t rtcCrashCount;      // Consecutive crash count
 
-// SD_MMC pin definitions for ESP32
+// SD_MMC pin definitions for ESP32-S3 only (not for ESP32-CAM)
+#ifdef ARDUINO_FREENOVE_ESP32_S3_WROOM
 #define SD_MMC_CMD 38 //Please do not modify it.
 #define SD_MMC_CLK 39 //Please do not modify it. 
 #define SD_MMC_D0  40 //Please do not modify it.
+#endif
 
 // Boot/recovery state
 const char* configPortalReason = "none";     // Why portal was triggered
@@ -65,6 +70,7 @@ WiFiClient espClient;
 PubSubClient mqttClient(espClient);
 AsyncWebServer server(WEB_SERVER_PORT);
 WiFiManager wifiManager;
+Preferences resetPrefs;
 
 // Timing variables
 unsigned long lastCaptureTime = 0;
@@ -103,6 +109,7 @@ void setupSD();
 bool deleteAllCaptures();
 void setupCamera();
 void setupMQTT();
+void setupOTA();
 void setupWebServer();
 void reconnectMQTT();
 void publishStatus();
@@ -134,8 +141,17 @@ void checkWiFiFallback();
 
 void setup() {
     Serial.begin(115200);
+
+    // Check reset counter and crash loop FIRST (before anything else and any delays)
+    checkResetCounter();
+
+    // Configure SD_MMC pins (ESP32-S3 only)
+    #ifdef ARDUINO_FREENOVE_ESP32_S3_WROOM
     SD_MMC.setPins(SD_MMC_CLK, SD_MMC_CMD, SD_MMC_D0);
-    delay(2000);  // Extra delay to stabilize serial
+    #endif
+    
+    // Initialize trace instrumentation (keep early, but after reset check)
+    Trace::init();
 
     Serial.println("\n\n");
     Serial.println("========================================");
@@ -143,8 +159,7 @@ void setup() {
     Serial.println("========================================");
     Serial.println("[SETUP] Starting initialization...");
 
-    // Check reset counter and crash loop FIRST (before anything else)
-    checkResetCounter();
+    // Removed: reset check now runs at the very start to ensure window timing works
 
     // Load device name from filesystem
     Serial.println("[SETUP] Loading device name...");
@@ -217,6 +232,9 @@ void setup() {
     // Setup MQTT
     setupMQTT();
 
+    // Setup OTA updates (disabled)
+    // setupOTA();
+
     // Setup Web Server
     setupWebServer();
 
@@ -237,6 +255,9 @@ void setup() {
 
 void loop() {
     unsigned long currentMillis = millis();
+
+    // Handle OTA updates (disabled)
+    // ArduinoOTA.handle();
 
     // Check for WiFi fallback AP mode
     checkWiFiFallback();
@@ -583,11 +604,35 @@ void gracefulSDShutdown() {
 void setupSD() {
     Serial.println("[SD] Mounting SD card...");
     
-    // Attempt to mount SD card with 1-bit mode
-    if (!SD_MMC.begin("/sdcard", true, true, SDMMC_FREQ_DEFAULT, 5)) {
+    // ESP32-CAM: Reduce CPU frequency for stable SD_MMC operations
+    #ifndef ARDUINO_FREENOVE_ESP32_S3_WROOM
+    setCpuFrequencyMhz(160);  // Reduce from 240MHz to 160MHz for SD stability
+    Serial.println("[SD] CPU frequency reduced to 160MHz for SD_MMC stability");
+    #endif
+    
+    // Configure SD_MMC pins FIRST (critical for ESP32-S3)
+    #ifdef ARDUINO_FREENOVE_ESP32_S3_WROOM
+    Serial.println("[SD] Configuring pins for ESP32-S3...");
+    SD_MMC.setPins(SD_MMC_CLK, SD_MMC_CMD, SD_MMC_D0);
+    Serial.printf("[SD] Pins set: CLK=%d CMD=%d D0=%d\n", SD_MMC_CLK, SD_MMC_CMD, SD_MMC_D0);
+    #endif
+    
+    // Use different SD_MMC initialization based on board
+    #ifdef ARDUINO_FREENOVE_ESP32_S3_WROOM
+    // ESP32-S3: use 1-bit mode with proper parameters
+    Serial.println("[SD] Calling SD_MMC.begin(\"/sdcard\", true, false, 40000000)...");
+    if (!SD_MMC.begin("/sdcard", true, false, 40000000)) {
       Serial.println("[SD] Card Mount Failed");
       return;
     }
+    #else
+    // ESP32-CAM: use defaults (no parameters) - matches working SDMMC_Test.ino
+    if (!SD_MMC.begin()) {
+      Serial.println("[SD] Card Mount Failed");
+      return;
+    }
+    #endif
+    Serial.println("[SD] SD_MMC.begin() returned success");
     
     uint8_t cardType = SD_MMC.cardType();
     if (cardType == CARD_NONE) {
@@ -685,82 +730,88 @@ bool deleteAllCaptures() {
 // ==================== Reset Detection & Recovery ====================
 
 void checkResetCounter() {
-    // Check for triple-reset and crash loop conditions
+    // Check for triple-reset and crash loop conditions (ESP32-S3 reliable via NVS)
     // This must be called early in setup() before other initialization
-    
-    uint32_t currentTime = millis();
-    
-    // Check for crash loop first (5 consecutive incomplete boots)
-    if (rtcCrashLoopFlag == CRASH_LOOP_MAGIC) {
-        rtcCrashCount++;
-        Serial.printf("[RESET] Incomplete boot detected, crash count: %lu\n", rtcCrashCount);
-        
-        if (rtcCrashCount >= CRASH_LOOP_THRESHOLD) {
+
+    // Open preferences namespace for reset tracking
+    resetPrefs.begin("reset", false);
+
+    // ===== Crash loop detection =====
+    uint32_t crashFlag = resetPrefs.getUInt("crash_flag", 0);
+    uint32_t crashCnt = resetPrefs.getUInt("crash_cnt", 0);
+
+    if (crashFlag == CRASH_LOOP_MAGIC) {
+        crashCnt++;
+        resetPrefs.putUInt("crash_cnt", crashCnt);
+        Serial.printf("[RESET] Incomplete boot detected, crash count: %lu\n", crashCnt);
+
+        if (crashCnt >= CRASH_LOOP_THRESHOLD) {
             Serial.println("[RESET] CRASH LOOP RECOVERY - entering config portal");
             configPortalReason = "crash_recovery";
-            rtcCrashCount = 0;  // Reset for next time
+            resetPrefs.putUInt("crash_cnt", 0); // Reset for next time
         }
     } else {
-        // Fresh power-on (or RTC cleared), reset crash counter
-        rtcCrashCount = 0;
-        rtcResetCount = 0;      // Also clear reset count on power-on
-        rtcResetTimestamp = 0;
+        // Fresh power-on (or flag cleared), reset crash count only.
+        // Do NOT clear triple-reset counters here; they must persist across boots.
+        resetPrefs.putUInt("crash_cnt", 0);
     }
-    
-    // Set crash loop flag (cleared in clearCrashLoop after successful boot)
-    rtcCrashLoopFlag = CRASH_LOOP_MAGIC;
-    
-    // Check for triple-reset (3 resets within 2 seconds)
-    // Only if not already in crash recovery mode
+
+    // Mark boot in progress (cleared in clearCrashLoop after successful boot)
+    resetPrefs.putUInt("crash_flag", CRASH_LOOP_MAGIC);
+
+    // ===== Triple-reset detection =====
     if (strcmp(configPortalReason, "crash_recovery") != 0) {
-        // Sanity check: reset counter should be reasonable (0-10)
-        if (rtcResetCount > 10) {
-            Serial.printf("[RESET] Reset counter corrupted (%lu), clearing\n", rtcResetCount);
-            rtcResetCount = 0;
-            rtcResetTimestamp = 0;
+        uint32_t cnt = resetPrefs.getUInt("reset_cnt", 0);
+        uint32_t window = resetPrefs.getUInt("window", 0);
+
+        // Sanity check
+        if (cnt > 10) {
+            Serial.printf("[RESET] Reset counter corrupted (%lu), clearing\n", cnt);
+            cnt = 0;
+            window = 0;
+            resetPrefs.putUInt("reset_cnt", cnt);
+            resetPrefs.putUInt("window", window);
         }
-        
-        // Check if this reset is within the timeout window of the last one
-        if (rtcResetTimestamp != 0 && rtcResetCount > 0 && rtcResetCount < 10) {
-            // RTC timestamp was set and counter is valid
-            rtcResetCount++;
-            Serial.printf("[RESET] Reset count: %lu (within window)\n", rtcResetCount);
-            
-            if (rtcResetCount >= RESET_COUNT_THRESHOLD) {
+
+        if (window == 1 && cnt > 0 && cnt < 10) {
+            // Previous boot started a detection window
+            cnt++;
+            resetPrefs.putUInt("reset_cnt", cnt);
+            Serial.printf("[RESET] Reset count: %lu (within window)\n", cnt);
+
+            if (cnt >= RESET_COUNT_THRESHOLD) {
                 Serial.println("[RESET] TRIPLE RESET DETECTED - entering config portal");
                 configPortalReason = "triple_reset";
-                rtcResetCount = 0;  // Reset for next time
-                rtcResetTimestamp = 0;
+                // Clear for next time
+                resetPrefs.putUInt("reset_cnt", 0);
+                resetPrefs.putUInt("window", 0);
             }
         } else {
             // First reset or outside window
-            rtcResetCount = 1;
+            cnt = 1;
+            window = 1;
+            resetPrefs.putUInt("reset_cnt", cnt);
+            resetPrefs.putUInt("window", window);
             Serial.println("[RESET] First reset, starting detection window");
         }
-        
-        // Store timestamp for next boot
-        rtcResetTimestamp = 1;  // Mark that a reset occurred
-        
-        // Wait for reset window, then clear counter if no more resets
-        // This is done asynchronously - if device doesn't reset within window,
-        // the counter stays but timestamp check will fail on next boot
+
+        // Wait for window; if no reset occurs, clear markers
         delay(RESET_DETECT_TIMEOUT * 1000);
-        
-        // If we get here, no more resets happened within window
+
         if (strcmp(configPortalReason, "none") == 0) {
             Serial.println("[RESET] Reset window expired, normal boot");
-            rtcResetCount = 0;
-            rtcResetTimestamp = 0;
+            resetPrefs.putUInt("reset_cnt", 0);
+            resetPrefs.putUInt("window", 0);
         }
     }
-    
+
     Serial.printf("[RESET] Boot reason: %s\n", configPortalReason);
 }
 
 void clearCrashLoop() {
     // Called after successful boot (WiFi + camera + web server initialized)
-    rtcCrashLoopFlag = 0;
-    rtcCrashCount = 0;
+    resetPrefs.putUInt("crash_flag", 0);
+    resetPrefs.putUInt("crash_cnt", 0);
     Serial.println("[RESET] Crash loop flag cleared - boot successful");
 }
 
@@ -832,6 +883,9 @@ void handleMotionDetection() {
     JsonDocument motionDoc;
     motionDoc["device"] = deviceName;
     motionDoc["chip_id"] = deviceChipId;
+    motionDoc["trace_id"] = Trace::getTraceId();
+    motionDoc["traceparent"] = Trace::getTraceparent();
+    motionDoc["seq_num"] = Trace::getSequenceNumber();
     motionDoc["timestamp"] = millis() / 1000;
     motionDoc["motion_count"] = motionDetectCount;
     motionDoc["event"] = "motion_detected";
@@ -858,7 +912,7 @@ void setupWiFi() {
     Serial.println("Setting up WiFi...");
 
     // Set WiFi mode - use AP_STA to allow fallback AP later
-    WiFi.mode(WIFI_STA);
+    WiFi.mode(WIFI_AP_STA);
 
     // Create custom AP name based on device name
     String apName = String(deviceName);
@@ -991,9 +1045,68 @@ void setupMQTT() {
     Serial.println("Setting up MQTT...");
     mqttClient.setServer(MQTT_SERVER, MQTT_PORT);
     mqttClient.setCallback(mqttCallback);
-    mqttClient.setBufferSize(1024); // Increase buffer for JSON messages
+    mqttClient.setKeepAlive(60);        // Keep-alive ping every 60s
+    mqttClient.setSocketTimeout(30);    // Socket timeout 30s
+    mqttClient.setBufferSize(1024);     // Increase buffer for JSON messages
 
     reconnectMQTT();
+}
+
+void setupOTA() {
+    // Set OTA hostname to match device name for easy identification
+    String hostname = String(OTA_HOSTNAME_PREFIX) + "-" + deviceChipId;
+    ArduinoOTA.setHostname(hostname.c_str());
+    ArduinoOTA.setPassword(OTA_PASSWORD);
+
+    ArduinoOTA.onStart([]() {
+        String type;
+        if (ArduinoOTA.getCommand() == U_FLASH) {
+            type = "sketch";
+        } else { // U_SPIFFS
+            type = "filesystem";
+        }
+        Serial.println("[OTA] Starting update: " + type);
+        
+        // Log OTA start event to MQTT
+        logEventToMQTT("ota_start", "info");
+    });
+
+    ArduinoOTA.onEnd([]() {
+        Serial.println("\n[OTA] Update complete!");
+        
+        // Log OTA completion to MQTT
+        logEventToMQTT("ota_complete", "info");
+        
+        // Give time for MQTT message to send
+        delay(100);
+    });
+
+    ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
+        static unsigned long lastLog = 0;
+        unsigned long now = millis();
+        // Log progress every 2 seconds to avoid flooding
+        if (now - lastLog > 2000) {
+            Serial.printf("[OTA] Progress: %u%%\r", (progress / (total / 100)));
+            lastLog = now;
+        }
+    });
+
+    ArduinoOTA.onError([](ota_error_t error) {
+        Serial.printf("[OTA] Error[%u]: ", error);
+        String errorMsg;
+        if (error == OTA_AUTH_ERROR) errorMsg = "Auth Failed";
+        else if (error == OTA_BEGIN_ERROR) errorMsg = "Begin Failed";
+        else if (error == OTA_CONNECT_ERROR) errorMsg = "Connect Failed";
+        else if (error == OTA_RECEIVE_ERROR) errorMsg = "Receive Failed";
+        else if (error == OTA_END_ERROR) errorMsg = "End Failed";
+        Serial.println(errorMsg);
+        
+        // Log OTA error to MQTT
+        logEventToMQTT("ota_error", "error");
+    });
+
+    ArduinoOTA.begin();
+    Serial.printf("[OTA] Ready on %s.local\n", hostname.c_str());
 }
 
 void setupWebServer() {
@@ -1172,7 +1285,14 @@ void setupWebServer() {
     });
 
     server.begin();
-    Serial.printf("Web server started on http://%s\n", WiFi.localIP().toString().c_str());
+    // Log reachable addresses depending on current mode
+    wifi_mode_t mode = WiFi.getMode();
+    if (mode & WIFI_MODE_STA) {
+        Serial.printf("Web server (STA) on http://%s\n", WiFi.localIP().toString().c_str());
+    }
+    if (mode & WIFI_MODE_AP) {
+        Serial.printf("Web server (AP)  on http://%s\n", WiFi.softAPIP().toString().c_str());
+    }
 }
 
 void reconnectMQTT() {
@@ -1180,11 +1300,24 @@ void reconnectMQTT() {
         return;
     }
 
-    Serial.print("Attempting MQTT connection...");
+    Serial.printf("[MQTT] Connecting to %s:%d...", MQTT_SERVER, MQTT_PORT);
 
-    String clientId = String(deviceName) + "-" + String(WiFi.macAddress());
+    // Shorten client ID to avoid broker limits
+    String clientId = String(deviceName) + "-" + deviceChipId;
+    clientId.replace(" ", "-");
+    if (clientId.length() > 23) {
+        clientId = clientId.substring(0, 23);
+    }
 
-    if (mqttClient.connect(clientId.c_str(), MQTT_USER, MQTT_PASSWORD)) {
+    // Anonymous connect if credentials are empty, otherwise authenticate
+    bool connected;
+    if (strlen(MQTT_USER) == 0) {
+        connected = mqttClient.connect(clientId.c_str());
+    } else {
+        connected = mqttClient.connect(clientId.c_str(), MQTT_USER, MQTT_PASSWORD);
+    }
+
+    if (connected) {
         Serial.println("connected!");
         mqttConnected = true;
 
@@ -1194,8 +1327,7 @@ void reconnectMQTT() {
         // Publish status
         publishStatus();
     } else {
-        Serial.print("failed, rc=");
-        Serial.println(mqttClient.state());
+        Serial.printf("failed, rc=%d\n", mqttClient.state());
         mqttConnected = false;
     }
 }
@@ -1212,6 +1344,9 @@ void publishStatus() {
     JsonDocument doc;
     doc["device"] = deviceName;
     doc["chip_id"] = deviceChipId;
+    doc["trace_id"] = Trace::getTraceId();
+    doc["traceparent"] = Trace::getTraceparent();
+    doc["seq_num"] = Trace::getSequenceNumber();
     doc["version"] = FIRMWARE_VERSION;
     doc["ip"] = WiFi.localIP().toString();
     doc["rssi"] = WiFi.RSSI();
@@ -1275,6 +1410,11 @@ void captureAndPublish() {
     // Note: Large images may need to be published in chunks or base64 encoded
     // For now, just publish metadata
     JsonDocument doc;
+    doc["device"] = deviceName;
+    doc["chip_id"] = deviceChipId;
+    doc["trace_id"] = Trace::getTraceId();
+    doc["traceparent"] = Trace::getTraceparent();
+    doc["seq_num"] = Trace::getSequenceNumber();
     doc["timestamp"] = millis();
     doc["size"] = fb->len;
     doc["width"] = fb->width;
@@ -1523,6 +1663,7 @@ button{font-size:13px;padding:0 8px;line-height:26px}
 <button id="preset-smooth" class="preset small">Fast</button>
 <button id="preset-balanced" class="preset small">Default</button>
 <button id="preset-detail" class="preset small">High-Quality</button>
+<button id="reset-sensor" class="small" style="background:var(--danger);color:#fff;padding:0 12px">Reset Cam</button>
 <button id="clear_sd" class="preset small" style="margin-left:8px">Clear SD</button>
 <button id="format_sd" class="preset small">Format SD</button>
 <div id="sd_status" style="font-size:10px;font-weight:bold;padding:0 4px;"></div>
@@ -2060,6 +2201,13 @@ setAndPush('aec','1');
 setAndPush('aec_value','300');
 setAndPush('gainceiling','3');
 };
+// Reset Sensor: Revert all hardware settings to defaults
+document.getElementById('reset-sensor').onclick=()=>{
+if(!confirm('Reset all camera sensor settings to defaults?')) return;
+fetch(`${baseHost}/control?var=reset&val=1`).then(()=>{
+setTimeout(()=>{location.reload();},500);
+});
+};
 });
 </script>
 </body>
@@ -2295,6 +2443,9 @@ void handleControl(AsyncWebServerRequest *request) {
         res = s->set_dcw(s, val);
     } else if (var == "colorbar") {
         res = s->set_colorbar(s, val);
+    } else if (var == "reset") {
+        resetCameraSettings();
+        res = 0;
     } else {
         request->send(400, "text/plain", "Unknown control parameter");
         return;
@@ -2315,6 +2466,10 @@ void publishMetricsToMQTT() {
     JsonDocument doc;
     doc["device"] = deviceName;
     doc["chip_id"] = deviceChipId;
+    doc["trace_id"] = Trace::getTraceId();
+    doc["traceparent"] = Trace::getTraceparent();
+    doc["seq_num"] = Trace::getSequenceNumber();
+    doc["schema_version"] = 1;
     doc["location"] = "surveillance";
     doc["timestamp"] = millis() / 1000;
     doc["uptime"] = millis() / 1000;
@@ -2343,6 +2498,10 @@ void logEventToMQTT(const char* event, const char* severity) {
     JsonDocument doc;
     doc["device"] = deviceName;
     doc["chip_id"] = deviceChipId;
+    doc["trace_id"] = Trace::getTraceId();
+    doc["traceparent"] = Trace::getTraceparent();
+    doc["seq_num"] = Trace::getSequenceNumber();
+    doc["schema_version"] = 1;
     doc["location"] = "surveillance";
     doc["timestamp"] = millis() / 1000;
     doc["event"] = event;

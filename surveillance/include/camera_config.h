@@ -70,6 +70,9 @@ camera_config_t getCameraConfig();
 // Initialize camera
 bool initCamera();
 
+// Reset camera settings to defaults
+void resetCameraSettings();
+
 // Capture and return a frame buffer
 camera_fb_t* capturePhoto();
 

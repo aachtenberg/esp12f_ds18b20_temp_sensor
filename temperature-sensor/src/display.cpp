@@ -19,6 +19,15 @@ U8G2_SSD1306_128X64_NONAME_F_HW_I2C display(
 );
 
 // =============================================================================
+// DISPLAY GATING STATE (for power saving)
+// =============================================================================
+
+#if OLED_GATE_ENABLED
+static unsigned long lastDisplayOnTime = 0;  // Track when display was last turned on
+static bool displayShouldBeOn = true;        // Track current state
+#endif
+
+// =============================================================================
 // INITIALIZATION
 // =============================================================================
 
@@ -50,7 +59,42 @@ void initDisplay() {
     display.drawStr(35, 50, "Starting...");
     display.sendBuffer();
 
+    #if OLED_GATE_ENABLED
+    lastDisplayOnTime = millis();
+    displayShouldBeOn = true;
+    Serial.println("[OLED] Display gating enabled (10s on / 50s off per cycle)");
+    #else
     Serial.println("[OLED] Display initialized successfully");
+    #endif
+}
+
+// =============================================================================
+// DISPLAY GATING LOGIC
+// =============================================================================
+
+bool isDisplayOnWindow() {
+    #if !OLED_GATE_ENABLED
+    return true;  // Always on if gating disabled
+    #else
+    unsigned long now = millis();
+    unsigned long cyclePosition = now % OLED_CYCLE_DURATION_MS;
+    
+    // Display is on during first OLED_ON_DURATION_MS of each cycle
+    if (cyclePosition < OLED_ON_DURATION_MS) {
+        if (!displayShouldBeOn) {
+            displayShouldBeOn = true;
+            lastDisplayOnTime = now;
+            Serial.println("[OLED] Display turned on");
+        }
+        return true;
+    } else {
+        if (displayShouldBeOn) {
+            displayShouldBeOn = false;
+            Serial.println("[OLED] Display turned off (power save)");
+        }
+        return false;
+    }
+    #endif
 }
 
 // =============================================================================
@@ -58,6 +102,11 @@ void initDisplay() {
 // =============================================================================
 
 void updateDisplay(const char* tempC, const char* tempF, bool wifiConnected, const char* ipAddress) {
+    // Check gating window
+    if (!isDisplayOnWindow()) {
+        return;  // Skip update if outside display window
+    }
+    
     display.clearBuffer();
 
     // Parse temperature string and format to 1 decimal place
@@ -115,6 +164,10 @@ void initDisplay() {
 
 void updateDisplay(const char* tempC, const char* tempF, bool wifiConnected, const char* ipAddress) {
     // Stub: Do nothing when display is disabled
+}
+
+bool isDisplayOnWindow() {
+    return true;  // Stub: always return true for disabled display
 }
 
 #endif // OLED_ENABLED

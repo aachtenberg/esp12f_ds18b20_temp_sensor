@@ -65,7 +65,7 @@ if ($LASTEXITCODE -eq 0) {
     Write-Host "The device should now be available in WSL2 at /dev/ttyUSB0 or /dev/ttyACM0" -ForegroundColor Green
     Write-Host ""
     Write-Host "You can now run the flash script in WSL2:" -ForegroundColor Yellow
-    Write-Host "  cd /home/aachten/PlatformIO/esp12f_ds18b20_temp_sensor" -ForegroundColor Cyan
+    Write-Host "  cd /home/$env:USER/PlatformIO/esp12f_ds18b20_temp_sensor" -ForegroundColor Cyan
     Write-Host "  scripts/flash_device.sh 'Big Garage' esp8266" -ForegroundColor Cyan
 } else {
     Write-Host "❌ Failed to attach device. Please check the BUSID and try again." -ForegroundColor Red

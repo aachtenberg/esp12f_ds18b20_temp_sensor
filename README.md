@@ -9,6 +9,7 @@ Multi-device IoT monitoring platform for ESP32/ESP8266/ESP32-S3 with MQTT data p
 - [Temperature Sensor Project](#temperature-sensor-project)
 - [Solar Monitor Project](#solar-monitor-project)
 - [Configuration](#configuration)
+- [Secrets Hygiene](#secrets-hygiene)
 - [Architecture](#architecture)
 - [API Reference](#api-reference)
 - [Troubleshooting](#troubleshooting)
@@ -101,7 +102,18 @@ mosquitto_sub -h your.mqtt.broker.com -t "esp-sensor-hub/+/status" -R -v
 
 ---
 
-## Temperature Sensor Project
+## Secrets Hygiene
+
+- Secrets files are gitignored: `**/secrets.h`, `.env*`, `*.key`, `*.pem`, `*.crt`.
+- Never commit real credentials; use the `*.example` templates and keep your local copies untracked.
+- **Automated scanning**: GitHub Actions runs [gitleaks](https://github.com/gitleaks/gitleaks) on every push and PR to detect secrets before they reach the public repo (see [`.github/workflows/secrets-check.yml`](.github/workflows/secrets-check.yml)).
+- Optional pre-push guard: install the secret scanner hook so pushes fail if secret-like files or private keys slip in:
+  ```bash
+  cd $(git rev-parse --show-toplevel)
+  ln -sf scripts/pre-push-secrets.sh .git/hooks/pre-push
+  chmod +x scripts/pre-push-secrets.sh
+  ```
+  The local hook checks for tracked `secrets.h`, `.env`, key files, and PEM blobs (private keys).
 
 ### Hardware Requirements
 
@@ -195,7 +207,8 @@ The ESP32 solar monitor publishes real-time solar metrics (voltage, current, pow
 | Temperature | DallasTemperature | 4.0.5 | DS18B20 sensor reading |
 | OneWire | OneWire | 2.3.8 | 1-Wire protocol |
 | Display | U8g2 | 2.36.15 | OLED driver (optional) |
-| Reset | ESP_DoubleResetDetector | 1.3.2 | Factory reset on double-reset |
+| Reset | ESP_DoubleResetDetector | 1.3.2 | Factory reset on double-reset (ESP8266) |
+| Reset (S3) | Preferences (NVS) | Built-in | Triple-reset detection for ESP32-S3 |
 
 ---
 

@@ -39,7 +39,7 @@ See `camera_config.cpp` and `PERFORMANCE_OPTIMIZATIONS.md` for detailed tuning.
 - 💾 SD card capture storage with graceful shutdown
 - 🔦 Configurable flash LED (manual/capture modes - board-dependent)
 - 🔄 OTA firmware updates
-- 📱 WiFi configuration portal with triple-reset detection
+- 📱 WiFi configuration portal with **NVS-based triple-reset detection** (ESP32-S3)
 - 🛡️ Crash loop recovery and WiFi fallback AP
 - 💾 PSRAM support for smooth streaming
 - 📊 Board-specific optimizations (ESP32-CAM vs ESP32-S3)
@@ -108,11 +108,13 @@ pio device monitor -e esp32-s3-devkitc-1
 ### Initial WiFi Setup
 
 1. **Triple-reset detection**: Reset device 3 times within 2 seconds to enter config portal
+   - **ESP32-S3**: Uses NVS (non-volatile storage) to persist counters across hardware resets
+   - **ESP8266/ESP32**: Uses RTC memory with ESP_DoubleResetDetector library
 2. **Fallback AP**: If WiFi disconnects for 60+ seconds, fallback AP starts automatically
-3. Connect to AP: `Cam-[DeviceName]-Fallback` or `ESP32-CAM-Config`
-4. Open browser to the WiFiManager captive portal (e.g., `esp32-cam.local`)
-5. Configure WiFi credentials
-6. Device saves settings and connects
+3. Connect to AP: `Cam-[DeviceName]-Setup` (config portal) or `Cam-[DeviceName]-Fallback` (fallback mode)
+4. Open browser to `http://192.168.4.1` for WiFiManager captive portal
+5. Configure WiFi credentials and device name
+6. Device saves settings to NVS/flash and connects to your network
 
 ### Web Interface
 
@@ -196,9 +198,12 @@ Edit `include/device_config.h` to customize:
 
 ### WiFi Configuration
 - **Triple-reset**: Reset device 3 times within 2 seconds to force config portal
+  - Counters persist via **NVS (Preferences)** on ESP32-S3 for reliable hardware reset detection
+  - Window timeout configurable in `device_config.h` (`RESET_DETECT_TIMEOUT`, default: 2 seconds)
 - **Fallback AP**: Wait 60 seconds after WiFi loss for automatic AP mode
 - **Portal timeout**: Config portal times out after 2 minutes
 - **Remote reset**: Use `/wifi-reset?token=[SECRET]` endpoint if configured
+- **AP addresses**: Config portal at `http://192.168.4.1`, fallback AP displays IP on serial
 
 ### MQTT Connection Failed
 - Verify broker address and port in `secrets.h`
@@ -251,6 +256,8 @@ surveillance/
 - **WiFiManager** (tzapu) - WiFi configuration portal
 - **me-no-dev/AsyncTCP** ^1.1.1 - Async networking
 - **me-no-dev/ESPAsyncWebServer** ^1.2.3 - Web server
+- **khoih-prog/ESP_DoubleResetDetector** ^1.3.2 - Reset detection (ESP8266/ESP32 fallback)
+- **Preferences** (built-in) - NVS storage for ESP32-S3 reset/crash tracking
 
 ### Build Environments
 
@@ -284,10 +291,11 @@ surveillance/
 - Web UI provides feedback on save status via HTTP headers
 
 **Recovery Systems:**
-- Triple-reset detection (within 2 seconds)
-- Crash loop detection (5 incomplete boots)
-- WiFi fallback AP (after 60 seconds)
-- RTC memory for persistent counters
+- Triple-reset detection (within 2 seconds) using NVS persistence
+- Crash loop detection (5 incomplete boots) with NVS tracking
+- WiFi fallback AP (after 60 seconds) with automatic STA/AP mode switching
+- **ESP32-S3**: Uses Preferences (NVS) for reliable reset/crash tracking across hardware resets
+- **ESP8266/ESP32**: Uses RTC memory with ESP_DoubleResetDetector library
 
 ## Future Enhancements
 

@@ -18,7 +18,10 @@
 
 // Set to 1 to enable OLED display, 0 to disable
 // When disabled, stub functions are used to prevent crashes if hardware is not connected
-#define OLED_ENABLED 0
+// Allow override via build flags (e.g., -D OLED_ENABLED=0)
+#ifndef OLED_ENABLED
+#define OLED_ENABLED 1
+#endif
 
 #if OLED_ENABLED
 
@@ -35,11 +38,33 @@
 // Display Update Timing
 #define DISPLAY_UPDATE_INTERVAL 1000  // milliseconds
 
+// Display Gating for Power Saving
+// When gating is enabled, display only shows for 10s per minute (saves ~60% OLED power)
+// Import OLED_GATE_ENABLED from device_config.h
+#ifndef OLED_GATE_ENABLED
+#define OLED_GATE_ENABLED 0  // Default: always on if not specified
+#endif
+
+#if OLED_GATE_ENABLED
+#ifndef OLED_ON_DURATION_MS
+#define OLED_ON_DURATION_MS 10000      // Display on for 10 seconds
+#endif
+#ifndef OLED_CYCLE_DURATION_MS
+#define OLED_CYCLE_DURATION_MS 60000   // Full cycle is 60 seconds
+#endif
+#endif  // OLED_GATE_ENABLED
+
 #endif // OLED_ENABLED
 
 // =============================================================================
 // PUBLIC API
 // =============================================================================
+
+/**
+ * Check if OLED display should be on (respects gating schedule)
+ * Call this before updateDisplay() to honor power-save gating
+ */
+bool isDisplayOnWindow();
 
 /**
  * Initialize the OLED display
