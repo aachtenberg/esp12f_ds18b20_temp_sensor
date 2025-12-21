@@ -13,6 +13,12 @@
 #define MQTT_PORT 1883
 #define MQTT_RECONNECT_INTERVAL 5000  // 5 seconds
 
+// SFTP Upload settings
+#define SFTP_RETRY_ATTEMPTS 3        // Number of upload retry attempts
+#define SFTP_TIMEOUT_MS 15000        // Connection timeout (15 seconds)
+#define SFTP_RETRY_DELAY_MS 2000     // Delay between retries (2 seconds)
+#define SFTP_MIN_FREE_HEAP 100000    // Minimum free heap required for SFTP upload
+
 // MQTT Topics (base paths - device-specific topics built dynamically)
 #define MQTT_TOPIC_BASE "surveillance"
 #define MQTT_TOPIC_STATUS_SUFFIX "/status"

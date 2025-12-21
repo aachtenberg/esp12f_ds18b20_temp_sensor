@@ -12,7 +12,7 @@ echo "   Camera: OV2640 (legacy)"
 echo ""
 
 ./bin/arduino-cli compile \
-  --fqbn esp32:esp32:esp32cam \
+  --fqbn esp32:esp32:esp32cam --show-properties\
   ESP32CAM_Surveillance \
   --verify
 

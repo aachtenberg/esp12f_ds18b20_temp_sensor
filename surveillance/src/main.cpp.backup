@@ -1,43 +1,4 @@
-// ESP32-CAM Surveillance System
-// Arduino IDE version - converted from PlatformIO
-// Remove the first #include <Arduino.h> - not needed in Arduino IDE
-
-// ============================================================================
-// BOARD SELECTION
-// ============================================================================
-// This sketch supports multiple ESP32 boards. The board is detected via macros:
-//
-// 1. FREENOVE ESP32-S3 WROOM (RECOMMENDED - Primary board)
-//    - Compile: ./COMPILE_ESP32S3.sh
-//    - Features: OV3660 camera, 8MB PSRAM, SD card support (1-bit mode)
-//    - Pins: SD_MMC on CLK=39, CMD=38, D0=40
-//    - Status: FULLY SUPPORTED & TESTED
-//
-// 2. AI THINKER ESP32-CAM (Legacy support)
-//    - Compile: ./bin/arduino-cli compile --fqbn esp32:esp32:esp32cam ESP32CAM_Surveillance
-//    - Features: OV2640 camera, no PSRAM, SD card support (2-bit mode)
-//    - Status: Code compatible (pin defs conditional)
-//
-// 3. ESP32 DEVKIT (Testing without camera)
-//    - Compile: ./bin/arduino-cli compile --fqbn esp32:esp32:esp32 ESP32CAM_Surveillance
-//    - Features: WiFi, MQTT, web server (no camera/SD)
-//    - Status: Code compatible
-//
-// NOTE: Arduino CLI does NOT automatically define ARDUINO_FREENOVE_ESP32_S3_WROOM
-// even when using --fqbn esp32:esp32:esp32s3. We force-define it here to ensure
-// the correct board paths are taken. This is removed/unused for ESP32-CAM.
-// ============================================================================
-
-// Force-define for Freenove ESP32-S3 when compiling with Arduino CLI
-// (Arduino IDE and PlatformIO may define this automatically, but Arduino CLI doesn't)
-#define ARDUINO_FREENOVE_ESP32_S3_WROOM 1
-
-// SD_MMC pin definitions for ESP32-S3 (Freenove WROOM)
-// Only used when ARDUINO_FREENOVE_ESP32_S3_WROOM is defined
-#define SD_MMC_CMD 38
-#define SD_MMC_CLK 39
-#define SD_MMC_D0  40
-
+#include <Arduino.h>
 #include <WiFi.h>
 #include <WiFiManager.h>
 #include <PubSubClient.h>
@@ -48,9 +9,6 @@
 #include <base64.h>
 #include <LittleFS.h>
 #include <SD_MMC.h>
-#include <esp_task_wdt.h>
-#include <libssh_esp32.h>
-#include <libssh/libssh.h>
 #include <Preferences.h>
 #include <esp_system.h>
 #include <img_converters.h>
@@ -66,8 +24,17 @@ RTC_NOINIT_ATTR uint32_t rtcResetTimestamp;  // Timestamp of last reset
 RTC_NOINIT_ATTR uint32_t rtcCrashLoopFlag;   // Magic number if boot incomplete
 RTC_NOINIT_ATTR uint32_t rtcCrashCount;      // Consecutive crash count
 
+// SD_MMC pin definitions for ESP32-S3 only (not for ESP32-CAM)
+#ifdef ARDUINO_FREENOVE_ESP32_S3_WROOM
+#define SD_MMC_CMD 38 //Please do not modify it.
+#define SD_MMC_CLK 39 //Please do not modify it. 
+#define SD_MMC_D0  40 //Please do not modify it.
+#endif
+
 // Boot/recovery state
 const char* configPortalReason = "none";     // Why portal was triggered
+bool fallbackAPActive = false;                // Fallback AP is running
+unsigned long wifiDisconnectTime = 0;         // When WiFi first disconnected
 
 // Device name storage
 char deviceName[40] = "Surveillance Cam";
@@ -90,13 +57,6 @@ const char* FLASH_CONFIG_FILE = "/flash_config.txt";
 bool flashEnabled = true;   // Flash during captures (always ON, not configurable)
 bool flashMotionEnabled = false;  // Flash for motion indicator (default OFF - too bright for continuous use)
 bool flashManualOn = false;  // Manual flashlight mode (default OFF)
-
-// SFTP Upload config
-const char* SFTP_CONFIG_FILE = "/sftp_config.txt";
-bool sftpEnabled = SFTP_ENABLED;  // Enable/disable SFTP upload
-unsigned long sftpSuccessCount = 0;
-unsigned long sftpFailCount = 0;
-unsigned long sftpFallbackCount = 0;
 
 // SD card capture storage
 bool sdReady = false;
@@ -137,8 +97,6 @@ void loadMotionConfig();
 void saveMotionConfig(bool enabled);
 void loadFlashConfig();
 void saveFlashConfig(bool illumination, bool motion);
-void loadSftpConfig();
-void saveSftpConfig(bool enabled);
 void getDeviceChipId();
 void getDeviceMacAddress();
 void IRAM_ATTR motionISR();
@@ -158,8 +116,6 @@ void captureAndPublishWithImage();
 void publishMetricsToMQTT();
 void logEventToMQTT(const char* event, const char* severity);
 bool saveImageToSD(camera_fb_t* fb, const char* reason);
-bool uploadImageToSFTP(camera_fb_t* fb, const char* filename);
-bool saveOrUploadImage(camera_fb_t* fb, const char* reason);
 
 // Dynamic topic builders (device-specific for multiple camera support)
 String getTopicStatus() { return String(MQTT_TOPIC_BASE) + "/" + deviceName + MQTT_TOPIC_STATUS_SUFFIX; }
@@ -175,7 +131,6 @@ void handleStream(AsyncWebServerRequest *request);
 void handleControl(AsyncWebServerRequest *request);
 void handleMotionControl(AsyncWebServerRequest *request);
 void handleFlashControl(AsyncWebServerRequest *request);
-void handleSftpControl(AsyncWebServerRequest *request);
 void handleWiFiReset(AsyncWebServerRequest *request);
 void handleMotionDetection();
 void checkResetCounter();
@@ -184,9 +139,6 @@ void checkWiFiFallback();
 
 void setup() {
     Serial.begin(115200);
-    
-    // Initialize libssh library
-    libssh_begin();
 
     // Check reset counter and crash loop FIRST (before anything else and any delays)
     checkResetCounter();
@@ -229,10 +181,6 @@ void setup() {
     Serial.println("[SETUP] Loading flash config...");
     loadFlashConfig();
 
-    // Load SFTP config
-    Serial.println("[SETUP] Loading SFTP config...");
-    loadSftpConfig();
-
     // Flash LED for capture illumination (controlled during capture only)
     if (FLASH_PIN >= 0) {
         pinMode(FLASH_PIN, OUTPUT);
@@ -254,9 +202,6 @@ void setup() {
     // Setup WiFi
     setupWiFi();
 
-    // Initialize SD card FIRST (before camera)
-    setupSD();
-
     // Initialize camera in background (non-blocking)
     // Camera will be initialized asynchronously, web server will respond with camera_ready=false until done
     xTaskCreate(
@@ -269,6 +214,10 @@ void setup() {
             } else {
                 Serial.println("[Camera] Initialization complete!");
                 Serial.printf("[Camera] cameraReady = %d\n", cameraReady);
+                
+                // Mount SD card AFTER camera init (like Arduino sketch)
+                Serial.println("[SD] Mounting SD card after camera init...");
+                setupSD();
             }
             vTaskDelete(NULL);
         },
@@ -319,6 +268,14 @@ void loop() {
             WiFi.reconnect();
             lastWiFiCheck = currentMillis;
         }
+    } else {
+        // WiFi reconnected - stop fallback AP if running
+        if (fallbackAPActive) {
+            Serial.println("[WiFi] STA reconnected, stopping fallback AP");
+            WiFi.softAPdisconnect(true);
+            fallbackAPActive = false;
+            wifiDisconnectTime = 0;
+        }
     }
 
     // Handle MQTT
@@ -344,30 +301,30 @@ void loop() {
     if (motionEnabled && cameraReady) {
         if (currentMillis - lastMotionCheck >= MOTION_CHECK_INTERVAL) {
             if (checkCameraMotion()) {
-                // Capture and save/upload image
-                camera_fb_t* fb = capturePhoto();
-                if (fb) {
-                    bool saved = saveOrUploadImage(fb, "motion");
-                    returnFrameBuffer(fb);
-                    
-                    // Motion detected - publish to MQTT with storage info
-                    if (mqttConnected) {
-                        JsonDocument doc;
-                        doc["device"] = deviceName;
-                        doc["motion"] = true;
-                        doc["timestamp"] = currentMillis / 1000;
-                        doc["count"] = motionDetectCount;
-                        doc["storage"] = sftpEnabled ? (saved ? "sftp" : "sd_fallback") : "sd";
-                        doc["saved"] = saved;
-                        doc["sftp_enabled"] = sftpEnabled;
-
-                        String output;
-                        serializeJson(doc, output);
-
-                        String topic = String(MQTT_TOPIC_BASE) + "/" + deviceName + "/motion";
-                        mqttClient.publish(topic.c_str(), output.c_str(), false);
-                        Serial.println("[Motion] Published to MQTT");
+                // Save to SD card if available
+                if (sdReady) {
+                    camera_fb_t* fb = capturePhoto();
+                    if (fb) {
+                        saveImageToSD(fb, "motion");
+                        returnFrameBuffer(fb);
                     }
+                }
+                
+                // Motion detected - publish to MQTT
+                if (mqttConnected) {
+                    JsonDocument doc;
+                    doc["device"] = deviceName;
+                    doc["motion"] = true;
+                    doc["timestamp"] = currentMillis / 1000;
+                    doc["count"] = motionDetectCount;
+                    doc["sd_saved"] = sdReady;
+
+                    String output;
+                    serializeJson(doc, output);
+
+                    String topic = String(MQTT_TOPIC_BASE) + "/" + deviceName + "/motion";
+                    mqttClient.publish(topic.c_str(), output.c_str(), false);
+                    Serial.println("[Motion] Published to MQTT");
                 }
                 
                 // Flash LED on motion if enabled (respects both motion flash setting and manual override)
@@ -637,42 +594,6 @@ void saveFlashConfig(bool illumination, bool motion) {
     }
 }
 
-void loadSftpConfig() {
-    if (!LittleFS.begin(true)) {
-        Serial.println("[FS] Warning: LittleFS mount issue, using default SFTP config");
-        return;
-    }
-
-    if (LittleFS.exists(SFTP_CONFIG_FILE)) {
-        File file = LittleFS.open(SFTP_CONFIG_FILE, "r");
-        if (file) {
-            String config = file.readStringUntil('\n');
-            config.trim();
-            sftpEnabled = (config == "1" || config.equalsIgnoreCase("true"));
-            Serial.printf("[Config] Loaded SFTP config: %s\n", sftpEnabled ? "enabled" : "disabled");
-            file.close();
-        }
-    } else {
-        Serial.printf("[Config] No saved SFTP config, using default: %s\n", sftpEnabled ? "enabled" : "disabled");
-    }
-}
-
-void saveSftpConfig(bool enabled) {
-    if (!LittleFS.begin(true)) {
-        Serial.println("[FS] Warning: Cannot save SFTP config due to filesystem issue");
-        return;
-    }
-
-    File file = LittleFS.open(SFTP_CONFIG_FILE, "w");
-    if (file) {
-        file.println(enabled ? "1" : "0");
-        file.close();
-        Serial.printf("[FS] Saved SFTP config: %s\n", enabled ? "enabled" : "disabled");
-    } else {
-        Serial.println("[FS] Failed to save SFTP config");
-    }
-}
-
 // SD Card recovery: graceful unmount before reboot to prevent corruption on power loss
 // Set to 0 to disable if it causes issues
 #define SD_GRACEFUL_UNMOUNT 1
@@ -694,31 +615,28 @@ void setupSD() {
     
     // Use different SD_MMC initialization based on board
     #ifdef ARDUINO_FREENOVE_ESP32_S3_WROOM
-    // ESP32-S3: Configure pins and begin with 5 parameters
-    Serial.println("[SD] Using ESP32-S3 WROOM configuration (5-parameter mode)");
-    SD_MMC.setPins(SD_MMC_CLK, SD_MMC_CMD, SD_MMC_D0);
+    // ESP32-S3: requires full parameters with 4-bit mode
     if (!SD_MMC.begin("/sdcard", true, true, SDMMC_FREQ_DEFAULT, 5)) {
       Serial.println("[SD] Card Mount Failed");
-      sdReady = false;
       return;
     }
     #else
-    // ESP32-CAM: use 1-bit mode with 2 parameters
+    // ESP32-CAM: use 1-bit mode with mountpoint like working Arduino sketch
+    // Note: "/sdcard" mountpoint, true = 1-bit mode (critical for ESP32-CAM)
     if (!SD_MMC.begin("/sdcard", true)) {
-      Serial.println("[SD] Card Mount Failed - ESP32-CAM mode");
-      sdReady = false;
+      Serial.println("[SD] Card Mount Failed");
       return;
     }
     #endif
     
     uint8_t cardType = SD_MMC.cardType();
-    if(cardType == CARD_NONE){
-        Serial.println("[SD] No SD_MMC card attached");
+    if (cardType == CARD_NONE) {
+        Serial.println("[SD] No SD card attached");
         sdReady = false;
         return;
     }
+    Serial.print("SD_MMC Card Type: ");
     
-    Serial.print("[SD] Card Type: ");
     if(cardType == CARD_MMC){
         Serial.println("MMC");
     } else if(cardType == CARD_SD){
@@ -728,14 +646,12 @@ void setupSD() {
     } else {
         Serial.println("UNKNOWN");
     }
-    
+
     sdReady = true;
     uint64_t cardSize = SD_MMC.cardSize() / (1024 * 1024);
-    Serial.printf("[SD] Card Size: %lluMB\n", cardSize);
-    Serial.printf("[SD] Total space: %lluMB\r\n", SD_MMC.totalBytes() / (1024 * 1024));
-    Serial.printf("[SD] Used space: %lluMB\r\n", SD_MMC.usedBytes() / (1024 * 1024));
+    Serial.printf("[SD] Card mounted successfully: %llu MB, Type: %d\n", cardSize, cardType);
     
-    // Create capture directory
+    // Create capture directory - mkdir returns 0 if already exists (like Arduino sketch)
     fs::FS &fs = SD_MMC;
     int dirResult = fs.mkdir(SD_CAPTURE_DIR);
     if (dirResult) {
@@ -787,244 +703,6 @@ bool saveImageToSD(camera_fb_t* fb, const char* reason) {
         Serial.printf("[SD] Write failed: expected %u, wrote %u\n", (unsigned int)fb->len, (unsigned int)written);
         return false;
     }
-}
-
-bool uploadImageToSFTP(camera_fb_t* fb, const char* filename) {
-    // Check prerequisites
-    if (!fb || WiFi.status() != WL_CONNECTED) {
-        Serial.println("[SFTP] Upload skipped - no WiFi or no frame buffer");
-        return false;
-    }
-
-    // Check available heap
-    uint32_t freeHeap = ESP.getFreeHeap();
-    if (freeHeap < SFTP_MIN_FREE_HEAP) {
-        Serial.printf("[SFTP] Insufficient heap: %u bytes (need %d) - using SD fallback\n", 
-                      freeHeap, SFTP_MIN_FREE_HEAP);
-        sftpFallbackCount++;
-        return false;
-    }
-
-    // Build remote path: /camera-uploads/{device_name}/{filename}
-    char remotePath[128];
-    snprintf(remotePath, sizeof(remotePath), "/camera-uploads/%s/%s", deviceName, filename);
-
-    Serial.printf("[SFTP] Uploading to %s:%d/%s/%s (%u bytes, heap: %u)\n", 
-                  SFTP_SERVER, SFTP_PORT, "camera-uploads", filename, (unsigned int)fb->len, freeHeap);
-
-    // Declare variables outside loop to avoid goto initialization errors
-    const size_t CHUNK_SIZE = 2048;  // 2KB chunks
-    size_t bytes_written;
-
-    // Retry loop
-    for (int attempt = 1; attempt <= SFTP_RETRY_ATTEMPTS; attempt++) {
-        Serial.printf("[SFTP] Attempt %d: heap before: %u\n", attempt, ESP.getFreeHeap());
-        ssh_session session = NULL;
-        ssh_scp scp = NULL;
-        ssh_key privateKey = NULL;
-        bool success = false;
-        int timeout, rc, port, auth_methods;
-        bytes_written = 0;
-
-        // Feed watchdog to prevent timeout during SSH operations
-        esp_task_wdt_reset();
-
-        // Create SSH session
-        session = ssh_new();
-        if (!session) {
-            Serial.printf("[SFTP] Attempt %d: Failed to create SSH session\n", attempt);
-            goto cleanup;
-        }
-
-        // Configure session
-        port = SFTP_PORT;
-        ssh_options_set(session, SSH_OPTIONS_HOST, SFTP_SERVER);
-        ssh_options_set(session, SSH_OPTIONS_PORT, &port);
-        ssh_options_set(session, SSH_OPTIONS_USER, SFTP_USERNAME);
-        
-        timeout = SFTP_TIMEOUT_MS / 1000;
-        ssh_options_set(session, SSH_OPTIONS_TIMEOUT, &timeout);
-
-        // Connect
-        rc = ssh_connect(session);
-        if (rc != SSH_OK) {
-            Serial.printf("[SFTP] Attempt %d: Connection failed: %s\n", attempt, ssh_get_error(session));
-            goto cleanup;
-        }
-
-        Serial.printf("[SFTP] Attempt %d: heap after connect: %u\n", attempt, ESP.getFreeHeap());
-        // Feed watchdog after connection
-        esp_task_wdt_reset();
-
-        // Try publickey authentication with ED25519 key
-        rc = ssh_userauth_none(session, NULL);
-        rc = ssh_pki_import_privkey_base64(SFTP_PRIVATE_KEY, NULL, NULL, NULL, &privateKey);
-        if (rc != SSH_OK) {
-            // Fall back to password auth if key import fails
-            rc = ssh_userauth_password(session, NULL, SFTP_PASSWORD);
-            if (rc != SSH_AUTH_SUCCESS) {
-                Serial.printf("[SFTP] Attempt %d: Auth failed: %s\n", attempt, ssh_get_error(session));
-                goto cleanup;
-            }
-        } else {
-            rc = ssh_userauth_publickey(session, NULL, privateKey);
-            if (rc != SSH_AUTH_SUCCESS) {
-                Serial.printf("[SFTP] Attempt %d: Auth failed: %s\n", attempt, ssh_get_error(session));
-                ssh_key_free(privateKey);
-                privateKey = NULL;
-                goto cleanup;
-            }
-            ssh_key_free(privateKey);
-            privateKey = NULL;
-        }
-        
-        Serial.printf("[SFTP] Attempt %d: heap after auth: %u\n", attempt, ESP.getFreeHeap());
-        // Feed watchdog after auth
-        esp_task_wdt_reset();
-
-        // Create SCP session directly to device subdirectory
-        // Note: /camera-uploads/{deviceName} must exist on server with write permissions
-        char scpPath[128];
-        snprintf(scpPath, sizeof(scpPath), "/camera-uploads/%s", deviceName);
-        scp = ssh_scp_new(session, SSH_SCP_WRITE | SSH_SCP_RECURSIVE, scpPath);
-        if (!scp) {
-            Serial.printf("[SFTP] Attempt %d: SCP init failed: %s\n", attempt, ssh_get_error(session));
-            goto cleanup;
-        }
-
-        // Initialize SCP
-        rc = ssh_scp_init(scp);
-        if (rc != SSH_OK) {
-            Serial.printf("[SFTP] Attempt %d: SCP init failed: %s\n", attempt, ssh_get_error(session));
-            goto cleanup;
-        }
-
-        Serial.printf("[SFTP] Attempt %d: heap after SCP init: %u\n", attempt, ESP.getFreeHeap());
-        // Feed watchdog after SCP init
-        esp_task_wdt_reset();
-
-        // Push the file directly
-        rc = ssh_scp_push_file(scp, filename, fb->len, 0644);
-        if (rc != SSH_OK) {
-            Serial.printf("[SFTP] Attempt %d: Push failed: %s\n", attempt, ssh_get_error(session));
-            goto cleanup;
-        }
-        Serial.printf("[SFTP] Attempt %d: heap after push_file: %u\n", attempt, ESP.getFreeHeap());
-
-        // Feed watchdog before writing data
-        esp_task_wdt_reset();
-
-        Serial.printf("[SFTP] Attempt %d: heap before write: %u\n", attempt, ESP.getFreeHeap());
-
-        // Write file data in chunks to avoid OOM with large images
-        bytes_written = 0;
-        while (bytes_written < fb->len) {
-            size_t chunk = (fb->len - bytes_written > CHUNK_SIZE) ? CHUNK_SIZE : (fb->len - bytes_written);
-            rc = ssh_scp_write(scp, fb->buf + bytes_written, chunk);
-            if (rc != SSH_OK) {
-                Serial.printf("[SFTP] Attempt %d: Write failed at %u/%u (heap: %u): %s\n", 
-                              attempt, (unsigned int)bytes_written, (unsigned int)fb->len, 
-                              ESP.getFreeHeap(), ssh_get_error(session));
-                goto cleanup;
-            }
-            bytes_written += chunk;
-            
-            // Feed watchdog periodically during large transfers
-            if (bytes_written % (CHUNK_SIZE * 4) == 0) {
-                esp_task_wdt_reset();
-            }
-        }
-
-        Serial.printf("[SFTP] ✓ Uploaded %s (%u bytes)\n", filename, (unsigned int)fb->len);
-        success = true;
-        sftpSuccessCount++;
-
-cleanup:
-        // Feed watchdog during cleanup
-        esp_task_wdt_reset();
-        
-        if (scp) {
-            ssh_scp_close(scp);
-            ssh_scp_free(scp);
-        }
-        if (privateKey) {
-            ssh_key_free(privateKey);
-        }
-        if (session) {
-            ssh_disconnect(session);
-            ssh_free(session);
-        }
-
-        if (success) {
-            return true;
-        }
-
-        // Retry delay
-        if (attempt < SFTP_RETRY_ATTEMPTS) {
-            Serial.printf("[SFTP] Retrying in %d ms...\n", SFTP_RETRY_DELAY_MS);
-            delay(SFTP_RETRY_DELAY_MS);
-        }
-    }
-
-    Serial.printf("[SFTP] All %d attempts failed\n", SFTP_RETRY_ATTEMPTS);
-    sftpFailCount++;
-    return false;
-}
-
-bool saveOrUploadImage(camera_fb_t* fb, const char* reason) {
-    if (!fb) {
-        Serial.println("[CAPTURE] No frame buffer to save/upload");
-        return false;
-    }
-
-    // Generate filename with timestamp
-    char filename[64];
-    snprintf(filename, sizeof(filename), "%lu_%s.jpg", millis(), reason);
-
-    bool success = false;
-    const char* storage = "none";
-
-    if (sftpEnabled) {
-        // SFTP primary - try upload first
-        Serial.printf("[CAPTURE] SFTP upload: %s\n", filename);
-        
-        if (uploadImageToSFTP(fb, filename)) {
-            // SFTP success
-            success = true;
-            storage = "sftp";
-            sftpSuccessCount++;
-        } else {
-            // SFTP failed - fallback to SD card if available
-            Serial.println("[SFTP] Failed - using SD fallback");
-            
-            if (sdReady) {
-                success = saveImageToSD(fb, reason);
-                if (success) {
-                    storage = "sd_fallback";
-                    sftpFallbackCount++;
-                    Serial.printf("[SD] Fallback save successful (fallback count: %lu)\n", sftpFallbackCount);
-                }
-            } else {
-                Serial.println("[SD] SD card not available - image lost");
-            }
-        }
-    } else {
-        // SD card primary
-        if (sdReady) {
-            success = saveImageToSD(fb, reason);
-            if (success) {
-                storage = "sd";
-            }
-        } else {
-            Serial.println("[SD] SD card not available and SFTP disabled - image lost");
-        }
-    }
-
-    // Log result for debugging
-    Serial.printf("[CAPTURE] Save result: %s (storage: %s)\n", 
-                  success ? "SUCCESS" : "FAILED", storage);
-
-    return success;
 }
 
 bool deleteOldestCaptures(int count) {
@@ -1207,8 +885,38 @@ void clearCrashLoop() {
 }
 
 void checkWiFiFallback() {
-    // Disabled - no fallback AP mode
-    // Triple-reset detection provides access to config portal
+    // Check if WiFi has been disconnected long enough to start fallback AP
+    unsigned long currentMillis = millis();
+    
+    if (WiFi.status() != WL_CONNECTED) {
+        // Track when WiFi first disconnected
+        if (wifiDisconnectTime == 0) {
+            wifiDisconnectTime = currentMillis;
+        }
+        
+        // Check if we've been disconnected long enough
+        if (!fallbackAPActive && (currentMillis - wifiDisconnectTime >= WIFI_FALLBACK_TIMEOUT)) {
+            Serial.println("[WiFi] Starting fallback AP mode");
+            
+            // Create AP name
+            String apName = String(deviceName);
+            apName.replace(" ", "-");
+            apName = "Cam-" + apName + "-Fallback";
+            
+            // Start AP alongside STA (device remains discoverable)
+            WiFi.mode(WIFI_AP_STA);
+            WiFi.softAP(apName.c_str());
+            
+            fallbackAPActive = true;
+            Serial.printf("[WiFi] Fallback AP started: %s\n", apName.c_str());
+            Serial.printf("[WiFi] AP IP: %s\n", WiFi.softAPIP().toString().c_str());
+            
+            logEventToMQTT("wifi_fallback_ap", "warning");
+        }
+    } else {
+        // WiFi is connected, reset disconnect timer
+        wifiDisconnectTime = 0;
+    }
 }
 
 // ==================== End Reset Detection & Recovery ====================
@@ -1272,8 +980,8 @@ void handleMotionDetection() {
 void setupWiFi() {
     Serial.println("Setting up WiFi...");
 
-    // Set WiFi mode to station (STA) only
-    WiFi.mode(WIFI_STA);
+    // Set WiFi mode - use AP_STA to allow fallback AP later
+    WiFi.mode(WIFI_AP_STA);
 
     // Create custom AP name based on device name
     String apName = String(deviceName);
@@ -1469,6 +1177,7 @@ void setupOTA() {
     ArduinoOTA.begin();
     Serial.printf("[OTA] Ready on %s.local\n", hostname.c_str());
 }
+
 void setupWebServer() {
     Serial.println("Setting up web server...");
 
@@ -1591,7 +1300,6 @@ void setupWebServer() {
         doc["device_name"] = deviceName;
         doc["chip_id"] = deviceChipId;
         doc["mac_address"] = deviceMac;
-        doc["ip"] = WiFi.localIP().toString();
         doc["version"] = FIRMWARE_VERSION;
         doc["uptime"] = millis() / 1000;
         doc["wifi_rssi"] = WiFi.RSSI();
@@ -1600,12 +1308,7 @@ void setupWebServer() {
         doc["camera_ready"] = cameraReady;
         doc["mqtt_connected"] = mqttConnected;
         doc["motion_enabled"] = motionEnabled;
-        doc["flash_manual"] = flashManualOn;
         doc["sd_ready"] = sdReady;
-        doc["sftp_enabled"] = sftpEnabled;
-        doc["sftp_success_count"] = sftpSuccessCount;
-        doc["sftp_fail_count"] = sftpFailCount;
-        doc["sftp_fallback_count"] = sftpFallbackCount;
         
         // Board capabilities
         #if defined(CAMERA_MODEL_AI_THINKER)
@@ -1615,8 +1318,6 @@ void setupWebServer() {
         #endif
         
         if (sdReady) {
-            doc["sd_total"] = SD_MMC.cardSize();
-            doc["sd_free"] = SD_MMC.totalBytes() - SD_MMC.usedBytes();
             doc["sd_size_mb"] = SD_MMC.cardSize() / (1024 * 1024);
             doc["sd_used_mb"] = SD_MMC.usedBytes() / (1024 * 1024);
         }
@@ -1624,6 +1325,11 @@ void setupWebServer() {
         // Reset/recovery status
         doc["boot_reason"] = configPortalReason;
         doc["crash_count"] = rtcCrashCount;
+        doc["fallback_ap_active"] = fallbackAPActive;
+        if (fallbackAPActive) {
+            doc["fallback_ap_ip"] = WiFi.softAPIP().toString();
+        }
+        doc["wifi_disconnect_time"] = wifiDisconnectTime > 0 ? (millis() - wifiDisconnectTime) / 1000 : 0;
 
         if (cameraReady) {
             sensor_t *s = esp_camera_sensor_get();
@@ -1656,50 +1362,7 @@ void setupWebServer() {
     // Motion control endpoint
     server.on("/motion-control", HTTP_GET, handleMotionControl);
     server.on("/flash-control", HTTP_GET, handleFlashControl);
-    server.on("/sftp-control", HTTP_GET, handleSftpControl);
-
-    // Device name endpoint
-    server.on("/device-name", HTTP_GET, [](AsyncWebServerRequest *request) {
-        if (request->hasParam("name")) {
-            String newName = request->getParam("name")->value();
-            newName.trim();
-
-            if (newName.length() == 0) {
-                request->send(400, "application/json", "{\"error\":\"Name cannot be empty\"}");
-                return;
-            }
-
-            if (newName.length() >= sizeof(deviceName)) {
-                request->send(400, "application/json", "{\"error\":\"Name too long (max 39 characters)\"}");
-                return;
-            }
-
-            // Update device name
-            strncpy(deviceName, newName.c_str(), sizeof(deviceName) - 1);
-            deviceName[sizeof(deviceName) - 1] = '\0';
-            saveDeviceName(deviceName);
-
-            Serial.printf("[API] Device name updated to: %s\n", deviceName);
-
-            JsonDocument doc;
-            doc["success"] = true;
-            doc["device_name"] = deviceName;
-            doc["message"] = "Device name updated successfully";
-
-            String response;
-            serializeJson(doc, response);
-            request->send(200, "application/json", response);
-        } else {
-            // Return current device name
-            JsonDocument doc;
-            doc["device_name"] = deviceName;
-
-            String response;
-            serializeJson(doc, response);
-            request->send(200, "application/json", response);
-        }
-    });
-
+    
     // WiFi reset endpoint (requires secret token)
     server.on("/wifi-reset", HTTP_GET, handleWiFiReset);
 
@@ -1829,14 +1492,11 @@ void publishStatus() {
     doc["free_psram"] = ESP.getFreePsram();
     doc["capture_count"] = captureCount;
     doc["camera_errors"] = cameraErrors;
-    doc["sftp_enabled"] = sftpEnabled;
-    doc["sftp_success"] = sftpSuccessCount;
-    doc["sftp_fail"] = sftpFailCount;
-    doc["sftp_fallback"] = sftpFallbackCount;
     
     // Reset/recovery status
     doc["boot_reason"] = configPortalReason;
     doc["crash_count"] = rtcCrashCount;
+    doc["fallback_ap_active"] = fallbackAPActive;
 
     String output;
     serializeJson(doc, output);
@@ -1873,10 +1533,12 @@ void captureAndPublish() {
     captureCount++;
     Serial.printf("Image captured: %d bytes\n", fb->len);
     
-    // Save or upload image
-    bool saved = saveOrUploadImage(fb, "capture");
+    // Save to SD card if available
+    saveImageToSD(fb, "capture");
 
-    // Publish image metadata to MQTT
+    // Publish image to MQTT (in chunks if needed)
+    // Note: Large images may need to be published in chunks or base64 encoded
+    // For now, just publish metadata
     JsonDocument doc;
     doc["device"] = deviceName;
     doc["chip_id"] = deviceChipId;
@@ -1888,9 +1550,6 @@ void captureAndPublish() {
     doc["width"] = fb->width;
     doc["height"] = fb->height;
     doc["format"] = "JPEG";
-    doc["storage"] = sftpEnabled ? (saved ? "sftp" : "sd_fallback") : "sd";
-    doc["saved"] = saved;
-    doc["sftp_enabled"] = sftpEnabled;
 
     String output;
     serializeJson(doc, output);
@@ -2004,507 +1663,720 @@ void handleRoot(AsyncWebServerRequest *request) {
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<meta http-equiv="cache-control" content="no-cache, no-store, must-revalidate">
-<meta http-equiv="pragma" content="no-cache">
-<meta http-equiv="expires" content="0">
 <title>ESP32-CAM Surveillance</title>
 <style>
 :root{
-  --primary-bg:#000000;
-  --secondary-bg:#1a1a1a;
-  --glass-bg:rgba(26,26,26,0.8);
-  --glass-border:rgba(255,255,255,0.1);
+  --primary-bg:#0f172a;
+  --secondary-bg:#1e293b;
+  --glass-bg:rgba(30,41,59,0.7);
+  --glass-border:rgba(148,163,184,0.15);
   --accent-cyan:#00d9ff;
-  --accent-blue:#007aff;
-  --text-primary:#ffffff;
-  --text-secondary:#a0a0a0;
-  --text-muted:#666666;
-  --success:#34c759;
-  --warning:#ff9500;
-  --error:#ff3b30;
-  --radius-lg:16px;
-  --radius-md:12px;
-  --radius-sm:8px;
+  --accent-purple:#7c3aed;
+  --text-primary:#f1f5f9;
+  --text-secondary:#cbd5e1;
+  --text-muted:#94a3b8;
+  --success:#10b981;
+  --warning:#f59e0b;
+  --error:#ef4444;
 }
 *{box-sizing:border-box;margin:0;padding:0}
-body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;background:var(--primary-bg);color:var(--text-primary);font-size:14px;height:100vh;overflow:hidden;display:flex;flex-direction:column}
-.app-container{display:flex;flex-direction:column;height:100vh;overflow:hidden;position:relative;width:100%}
-
-/* ===== HEADER ===== */
-.header{display:flex;align-items:center;justify-content:space-between;padding:12px 24px;background:var(--primary-bg);z-index:10;border-bottom:1px solid var(--glass-border)}
-.header-left{display:flex;flex-direction:column;gap:2px}
-.camera-name{font-size:18px;font-weight:600;display:flex;align-items:center;gap:8px}
-.camera-name::before{content:'●';color:var(--success);font-size:10px;margin-right:4px}
-.bitrate{font-size:12px;color:var(--text-secondary);font-family:monospace;opacity:0.8}
-.header-right{display:flex;gap:20px;align-items:center}
-.header-icon{width:24px;height:24px;fill:var(--text-primary);cursor:pointer;opacity:0.7;transition:all 0.2s}
-.header-icon:hover{opacity:1;transform:scale(1.1)}
-
-/* ===== VIDEO SECTION ===== */
-.video-main{flex:1;display:flex;align-items:center;justify-content:center;background:#080808;position:relative;overflow:hidden;padding:20px}
-.video-container{width:100%;max-width:1000px;aspect-ratio:16/9;background:#000;position:relative;overflow:hidden;display:flex;align-items:center;justify-content:center;border-radius:var(--radius-lg);box-shadow:0 20px 50px rgba(0,0,0,0.5);border:1px solid var(--glass-border)}
-.video-container img{width:100%;height:100%;object-fit:contain;display:none}
-.video-container img.active{display:block}
-.video-placeholder{position:absolute;display:flex;flex-direction:column;align-items:center;gap:16px;color:var(--text-muted)}
-.video-placeholder svg{width:64px;height:64px;fill:var(--text-muted);opacity:0.5}
-.video-overlay-top{position:absolute;top:12px;left:16px;font-family:monospace;font-size:14px;color:#fff;text-shadow:1px 1px 2px #000;pointer-events:none;background:rgba(0,0,0,0.3);padding:4px 8px;border-radius:4px}
-
-/* ===== VIDEO CONTROLS ===== */
-.video-controls{display:flex;align-items:center;justify-content:center;gap:32px;padding:20px;background:var(--primary-bg);border-top:1px solid var(--glass-border)}
-.control-btn{width:48px;height:48px;display:flex;align-items:center;justify-content:center;cursor:pointer;border-radius:50%;transition:all 0.2s;background:var(--secondary-bg)}
-.control-btn:hover{background:#333;transform:translateY(-2px)}
-.control-btn:active{transform:translateY(0)}
-.control-btn svg{width:24px;height:24px;fill:var(--text-primary)}
-.control-btn.active svg{fill:var(--accent-cyan)}
-.quality-badge{font-size:11px;font-weight:bold;border:1.5px solid var(--text-primary);padding:2px 6px;border-radius:6px;text-transform:uppercase;letter-spacing:0.5px}
-
-/* ===== SETTINGS PANEL (DRAWER) ===== */
-.settings-drawer{position:fixed;top:0;right:-100%;width:100%;max-width:500px;height:100%;background:var(--primary-bg);z-index:100;transition:right 0.3s cubic-bezier(0.4, 0, 0.2, 1);display:flex;flex-direction:column;box-shadow:-8px 0 32px rgba(0,0,0,0.7)}
-.settings-drawer.active{right:0}
-.settings-header{display:flex;align-items:center;padding:20px 24px;border-bottom:1px solid var(--glass-border)}
-.settings-title{flex:1;text-align:center;font-weight:600;font-size:18px}
-.close-settings{cursor:pointer;padding:8px;border-radius:50%;transition:background 0.2s}
-.close-settings:hover{background:var(--secondary-bg)}
-
-.settings-content{flex:1;overflow-y:auto;padding:24px}
-.settings-section{margin-bottom:32px}
-.settings-label{font-size:12px;font-weight:700;color:var(--text-muted);text-transform:uppercase;margin-bottom:16px;display:block;letter-spacing:1px}
-.settings-row{display:flex;align-items:center;justify-content:space-between;padding:16px 0;border-bottom:1px solid rgba(255,255,255,0.05)}
-.settings-row:last-child{border-bottom:none}
-
-/* ===== UI ELEMENTS ===== */
-select, input[type=text]{background:var(--secondary-bg);color:#fff;border:1px solid var(--glass-border);padding:8px 12px;border-radius:var(--radius-sm);font-size:14px;width:100%}
-.switch{position:relative;width:44px;height:24px}
-.switch input{opacity:0;width:0;height:0}
-.slider{position:absolute;cursor:pointer;top:0;left:0;right:0;bottom:0;background-color:#333;transition:.3s;border-radius:24px}
-.slider:before{position:absolute;content:"";height:18px;width:18px;left:3px;bottom:3px;background-color:white;transition:.3s;border-radius:50%}
-input:checked + .slider{background-color:var(--accent-blue)}
-input:checked + .slider:before{transform:translateX(20px)}
-
-.btn-primary{background:var(--accent-blue);color:#fff;border:none;padding:12px;border-radius:var(--radius-md);font-weight:600;cursor:pointer;width:100%;margin-top:12px}
-.btn-danger{background:var(--error);color:#fff;border:none;padding:12px;border-radius:var(--radius-md);font-weight:600;cursor:pointer;width:100%;margin-top:12px}
-
-/* ===== UTILS ===== */
-.hidden{display:none !important}
-.backdrop{position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.5);z-index:90;display:none}
-.backdrop.active{display:block}
-
-@media (min-width: 768px) {
-  .app-container { max-width: 100%; }
-  .video-main { padding: 40px; }
+body{font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif;background:linear-gradient(135deg,var(--primary-bg) 0%,#1a2942 100%);color:var(--text-primary);font-size:14px;height:100vh;overflow:hidden;backdrop-filter:blur(10px)}
+::selection{background:var(--accent-cyan);color:var(--primary-bg)}
+.app-container{display:flex;flex-direction:column;height:100vh;gap:12px;padding:16px;overflow:hidden}
+/* ===== STATUS BAR ===== */
+.status-bar{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:12px 16px;background:var(--glass-bg);border:1px solid var(--glass-border);border-radius:16px;backdrop-filter:blur(20px);box-shadow:0 8px 32px rgba(0,0,0,0.3)}
+.device-info{display:flex;align-items:center;gap:12px;flex:1;min-width:0}
+.device-icon{width:40px;height:40px;background:linear-gradient(135deg,var(--accent-purple),var(--accent-cyan));border-radius:12px;display:flex;align-items:center;justify-content:center;font-size:20px;flex-shrink:0;box-shadow:0 4px 16px rgba(124,58,237,0.3)}
+.device-details{display:flex;flex-direction:column;gap:2px;min-width:0;flex:1}
+.device-name{font-weight:600;font-size:15px;color:var(--text-primary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.device-meta{display:flex;gap:12px;font-size:12px;color:var(--text-muted);flex-wrap:wrap}
+.ip-address{display:flex;align-items:center;gap:6px;padding:6px 12px;background:rgba(0,217,255,0.1);border:1px solid rgba(0,217,255,0.3);border-radius:8px;border-radius:12px;cursor:pointer;transition:all 0.3s ease;font-family:monospace}
+.ip-address:hover{background:rgba(0,217,255,0.2);border-color:var(--accent-cyan)}
+.ip-label{color:var(--text-muted);font-size:11px}
+.ip-value{color:var(--accent-cyan);font-weight:600}
+.status-indicators{display:flex;gap:8px;flex-wrap:wrap}
+.status-indicator{display:flex;align-items:center;gap:6px;padding:6px 12px;background:var(--secondary-bg);border:1px solid var(--glass-border);border-radius:12px;font-size:12px;font-weight:500}
+.status-dot{width:8px;height:8px;border-radius:50%;animation:pulse 2s infinite}
+.status-dot.ok{background:var(--success);box-shadow:0 0 8px var(--success)}
+.status-dot.warn{background:var(--warning);animation:pulse-warn 2s infinite}
+.status-dot.err{background:var(--error)}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:0.5}}
+@keyframes pulse-warn{0%,100%{opacity:1}50%{opacity:0.6}}
+/* ===== MAIN LAYOUT ===== */
+.main-content{display:flex;gap:12px;flex:1;min-height:0;overflow:hidden}
+.stream-section{display:flex;flex-direction:column;flex:1;gap:12px;min-width:0}
+.viewer-glass{background:var(--glass-bg);border:1px solid var(--glass-border);border-radius:16px;backdrop-filter:blur(20px);display:flex;align-items:center;justify-content:center;flex:1;min-height:0;position:relative;overflow:hidden;box-shadow:0 8px 32px rgba(0,0,0,0.3)}
+.viewer-glass img{max-width:100%;max-height:100%;object-fit:contain}
+.viewer-glass.no-image::before{content:'📷';font-size:64px;opacity:0.2;position:absolute;z-index:0}
+.viewer-glass.no-image::after{content:'No Image';position:absolute;font-size:18px;color:var(--text-muted);opacity:0.4;z-index:0;top:calc(50% + 32px)}
+/* ===== CONTROL PANEL ===== */
+.control-panel{display:flex;flex-direction:column;gap:12px;width:320px;background:var(--glass-bg);border:1px solid var(--glass-border);border-radius:16px;backdrop-filter:blur(20px);padding:16px;box-shadow:0 8px 32px rgba(0,0,0,0.3);overflow-y:auto}
+.control-panel::-webkit-scrollbar{width:6px}
+.control-panel::-webkit-scrollbar-track{background:transparent}
+.control-panel::-webkit-scrollbar-thumb{background:var(--glass-border);border-radius:3px}
+.control-panel::-webkit-scrollbar-thumb:hover{background:var(--text-muted)}
+.section{display:flex;flex-direction:column;gap:8px}
+.section-label{font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:1px;color:var(--accent-cyan);margin-bottom:4px;opacity:0.8}
+.button-group{display:flex;gap:8px;flex-wrap:wrap}
+button{background:linear-gradient(135deg,var(--accent-cyan),#00a8cc);color:#000;border:none;padding:10px 16px;border-radius:12px;font-weight:600;cursor:pointer;transition:all 0.3s ease;font-size:13px;box-shadow:0 4px 12px rgba(0,217,255,0.2);white-space:nowrap}
+button:hover{transform:translateY(-2px);box-shadow:0 6px 20px rgba(0,217,255,0.4)}
+button:active{transform:translateY(0);opacity:0.8}
+button.secondary{background:var(--secondary-bg);color:var(--text-primary);border:1px solid var(--glass-border)}
+button.secondary:hover{background:var(--glass-bg);border-color:var(--accent-cyan)}
+button.danger{background:linear-gradient(135deg,#ef4444,#dc2626);box-shadow:0 4px 12px rgba(239,68,68,0.2)}
+button.danger:hover{box-shadow:0 6px 20px rgba(239,68,68,0.4)}
+button.small{padding:8px 12px;font-size:12px}
+button.flex-1{flex:1;min-width:100px}
+.control-input{display:flex;flex-direction:column;gap:6px}
+.control-input label{font-size:13px;font-weight:500;color:var(--text-secondary)}
+.control-input input[type=range],.control-input select{width:100%;padding:8px;background:var(--secondary-bg);border:1px solid var(--glass-border);border-radius:8px;color:var(--text-primary);font-size:13px}
+.control-input select{cursor:pointer}
+.slider-value{font-size:12px;color:var(--text-muted);text-align:right}
+.toggle-switch{display:flex;align-items:center;justify-content:space-between}
+.switch{position:relative;width:50px;height:28px}
+.switch input{display:none}
+.switch-slider{position:absolute;width:100%;height:100%;background:var(--secondary-bg);border:1px solid var(--glass-border);border-radius:14px;cursor:pointer;transition:0.3s;display:flex;align-items:center;padding:2px}
+.switch-slider::after{content:'';width:24px;height:24px;background:#fff;border-radius:50%;transition:0.3s;display:flex;align-items:center;justify-content:center}
+.switch input:checked+.switch-slider{background:var(--accent-cyan);border-color:var(--accent-cyan)}
+.switch input:checked+.switch-slider::after{transform:translateX(22px)}
+.tabs{display:flex;gap:4px;margin-bottom:8px;border-bottom:1px solid var(--glass-border);padding-bottom:8px}
+.tab-btn{background:transparent;color:var(--text-muted);padding:8px 12px;border:none;cursor:pointer;border-bottom:2px solid transparent;transition:all 0.3s;font-size:12px;font-weight:500}
+.tab-btn.active{color:var(--accent-cyan);border-bottom-color:var(--accent-cyan)}
+.tab-content{display:none}
+.tab-content.active{display:flex;flex-direction:column;gap:8px}
+/* ===== RESPONSIVE ===== */
+@media (max-width:1400px){
+.control-panel{width:280px}
+}
+@media (max-width:1200px){
+.control-panel{width:260px}
+.status-bar{flex-direction:column;align-items:flex-start}
+.ip-address{display:none}
+}
+@media (max-width:768px){
+.app-container{padding:8px;gap:8px}
+.main-content{flex-direction:column}
+.control-panel{display:none;width:100%}
+.control-panel.mobile-visible{display:flex;position:fixed;bottom:0;left:0;right:0;width:100%;height:50vh;border-radius:16px 16px 0 0;z-index:1000;max-height:70vh;overflow-y:auto}
+.mobile-toggle{display:inline-flex;position:fixed;bottom:16px;right:16px;width:56px;height:56px;border-radius:50%;z-index:1001;align-items:center;justify-content:center;box-shadow:0 8px 24px rgba(0,0,0,0.4)}
+.mobile-backdrop{display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.5);z-index:999;opacity:0;transition:opacity 0.3s}
+.mobile-backdrop.visible{display:block;opacity:1}
+}
+@media (max-width:480px){
+.device-meta{font-size:11px;gap:8px}
+.device-name{font-size:14px}
+.control-panel.mobile-visible{height:100%}
+.status-bar{padding:10px 12px}
 }
 </style>
 </head>
 <body>
 <div class="app-container">
-  <!-- HEADER -->
-  <header class="header">
-    <div class="header-left">
-      <div class="camera-name" id="camera-name-display">ESP32-CAM</div>
-      <div class="bitrate">
-        <span id="ip-display" style="color:var(--accent-cyan);margin-right:12px">--</span>
-        <span id="motion-status" style="margin-right:12px">●</span>
-        <span id="sd-status" style="margin-right:12px;color:var(--text-secondary)">💾 --</span>
-        <span id="sftp-status" style="margin-right:12px;color:var(--text-secondary)">📤 --</span>
-        <span id="bitrate-display">Ready</span>
+<!-- STATUS BAR -->
+<div class="status-bar">
+  <div class="device-info">
+    <div class="device-icon">📷</div>
+    <div class="device-details">
+      <div class="device-name">ESP32-CAM <span id="device-name">Loading...</span></div>
+      <div class="device-meta">
+        <span id="device-id">--</span>
+        <span id="wifi-status">WiFi: --</span>
+        <span id="mqtt-status">MQTT: --</span>
+        <span id="sd-status">SD: --</span>
       </div>
     </div>
-    <div class="header-right">
-      <svg class="header-icon" id="open-settings" viewBox="0 0 24 24"><path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58c.18-.14.23-.41.12-.61l-1.92-3.32c-.12-.22-.37-.29-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54c-.04-.24-.24-.41-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58c-.18.14-.23.41-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/></svg>
+  </div>
+  <div class="ip-address" id="ip-copy" title="Click to copy">
+    <span class="ip-label">IP:</span>
+    <span class="ip-value" id="ip-value">--</span>
+  </div>
+  <div class="status-indicators">
+    <div class="status-indicator">
+      <span class="status-dot ok"></span>
+      <span>System</span>
     </div>
-  </header>
+    <div class="status-indicator">
+      <span class="status-dot" id="motion-indicator">●</span>
+      <span>Motion</span>
+    </div>
+  </div>
+</div>
 
-  <!-- VIDEO SECTION -->
-  <div class="video-main">
-    <div class="video-container" id="video-container">
-      <div class="video-placeholder" id="video-placeholder">
-        <svg viewBox="0 0 24 24"><path d="M9 2L7.17 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2h-3.17L15 2H9zm3 15c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5z"/><circle cx="12" cy="12" r="3.2"/></svg>
-        <span>Click Play to start streaming</span>
-      </div>
-      <div class="video-overlay-top hidden" id="timestamp-overlay"></div>
+<!-- MAIN CONTENT -->
+<div class="main-content">
+  <div class="stream-section">
+    <div class="viewer-glass no-image">
       <img id="stream" src="" alt="Live Stream">
     </div>
-  </div>
-
-  <!-- VIDEO CONTROLS -->
-  <div class="video-controls">
-    <div class="control-btn" id="toggle-stream" title="Play/Pause Stream">
-      <svg viewBox="0 0 24 24" id="play-icon"><path d="M8 5v14l11-7z"/></svg>
-      <svg viewBox="0 0 24 24" id="pause-icon" class="hidden"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>
-    </div>
-    <div class="control-btn" id="get-still" title="Capture Still Image">
-      <svg viewBox="0 0 24 24"><path d="M9 2L7.17 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2h-3.17L15 2H9zm3 15c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5z"/><circle cx="12" cy="12" r="3.2"/></svg>
-    </div>
-    <div class="control-btn" title="Quality">
-      <span class="quality-badge" id="quality-badge">VGA</span>
-    </div>
-    <div class="control-btn" id="fullscreen-btn" title="Fullscreen">
-      <svg viewBox="0 0 24 24"><path d="M7 14H5v5h5v-2H7v-3zm-2-4h2V7h3V5H5v5zm12 7h-3v2h5v-5h-2v3zM14 5v2h3v3h2V5h-5z"/></svg>
+    <div style="display:flex;gap:12px;flex-wrap:wrap">
+      <button id="get-still" class="flex-1">📸 Capture</button>
+      <button id="toggle-stream" class="flex-1">▶ Stream</button>
+      <button id="reset-sensor" class="flex-1 danger small">⟲ Reset</button>
     </div>
   </div>
 
-  <!-- SETTINGS DRAWER -->
-  <div class="settings-drawer" id="settings-drawer">
-    <div class="settings-header">
-      <div class="close-settings" id="close-settings">
-        <svg viewBox="0 0 24 24" width="24" height="24" fill="white"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
-      </div>
-      <div class="settings-title">Settings</div>
-      <div style="width:24px"></div>
+  <!-- CONTROL PANEL -->
+  <div class="control-panel" id="control-panel">
+    <div class="tabs">
+      <button class="tab-btn active" data-tab="quick">Quick</button>
+      <button class="tab-btn" data-tab="image">Image</button>
+      <button class="tab-btn" data-tab="advanced">Advanced</button>
+      <button class="tab-btn" data-tab="storage">Storage</button>
     </div>
-    <div class="settings-content">
-      <div class="settings-section">
-        <span class="settings-label">Device</span>
-        <div class="settings-row">
-          <span>Name</span>
-          <input type="text" id="device-name-input" style="width:150px">
-        </div>
-        <button class="btn-primary" id="save-device-name">Save Name</button>
+
+    <!-- QUICK TAB -->
+    <div class="tab-content active" id="quick-tab">
+      <div class="section">
+        <label class="section-label">Resolution</label>
+        <select id="framesize" class="default-action">
+          <option value="8" selected>VGA (640×480)</option>
+          <option value="9">SVGA (800×600)</option>
+          <option value="10">XGA (1024×768)</option>
+          <option value="11">HD (1280×720)</option>
+          <option value="12">SXGA (1280×1024)</option>
+        </select>
       </div>
-
-      <div class="settings-section">
-        <span class="settings-label">Camera</span>
-        <div class="settings-row">
-          <span>Resolution</span>
-          <select id="framesize" class="default-action" style="width:150px">
-            <option value="8">VGA (640x480)</option>
-            <option value="9">SVGA (800x600)</option>
-            <option value="10">XGA (1024x768)</option>
-            <option value="11">HD (1280x720)</option>
-          </select>
-        </div>
-        <div class="settings-row">
-          <span>Quality</span>
-          <input type="range" id="quality" min="10" max="63" value="12" class="default-action" style="width:150px">
-        </div>
-        <div class="settings-row">
-          <span>Motion Detection</span>
-          <label class="switch">
-            <input type="checkbox" id="motion_enabled" class="default-action">
-            <span class="slider"></span>
-          </label>
-        </div>
-        <div class="settings-row">
-          <span>SFTP Upload</span>
-          <label class="switch">
-            <input type="checkbox" id="sftp_enabled">
-            <span class="slider"></span>
-          </label>
-        </div>
-        <div class="settings-row">
-          <span>Flashlight</span>
-          <label class="switch">
-            <input type="checkbox" id="flash_manual">
-            <span class="slider"></span>
-          </label>
-        </div>
-      </div>
-
-      <div class="settings-section">
-        <span class="settings-label">Image</span>
-        <div class="settings-row">
-          <span>Brightness</span>
-          <input type="range" id="brightness" min="-2" max="2" value="0" class="default-action" style="width:150px">
-        </div>
-        <div class="settings-row">
-          <span>V-Flip</span>
-          <label class="switch">
-            <input type="checkbox" id="vflip" class="default-action">
-            <span class="slider"></span>
-          </label>
-        </div>
-        <div class="settings-row">
-          <span>H-Mirror</span>
-          <label class="switch">
-            <input type="checkbox" id="hmirror" class="default-action">
-            <span class="slider"></span>
-          </label>
-        </div>
-      </div>
-
-      <div class="settings-section">
-        <span class="settings-label">System</span>
-        <div class="settings-row">
-          <span>IP Address</span>
-          <span id="ip-value" style="color:var(--accent-cyan);font-family:monospace">--</span>
-        </div>
-        <div class="settings-row">
-          <span>SD Card</span>
-          <span id="sd-info">--</span>
-        </div>
-        <button class="btn-primary" id="reboot-btn" style="background:var(--accent-blue);margin-bottom:12px">Reboot Device</button>
-        <button class="btn-danger" id="reset-sensor">Reset Camera Settings</button>
-      </div>
-    </div>
-  </div>
-
-  <div class="backdrop" id="backdrop"></div>
-</div>
-<script>
-document.addEventListener('DOMContentLoaded', function() {
-  const baseHost = document.location.origin;
-  const streamUrl = baseHost;
-  const view = document.getElementById('stream');
-  const toggleStreamBtn = document.getElementById('toggle-stream');
-  const playIcon = document.getElementById('play-icon');
-  const pauseIcon = document.getElementById('pause-icon');
-  const getStillBtn = document.getElementById('get-still');
-  const fullscreenBtn = document.getElementById('fullscreen-btn');
-  const videoContainer = document.getElementById('video-container');
-  const openSettingsBtn = document.getElementById('open-settings');
-  const closeSettingsBtn = document.getElementById('close-settings');
-  const settingsDrawer = document.getElementById('settings-drawer');
-  const backdrop = document.getElementById('backdrop');
-  const bitrateDisplay = document.getElementById('bitrate-display');
-  const qualityBadge = document.getElementById('quality-badge');
-  const timestampOverlay = document.getElementById('timestamp-overlay');
-  const videoPlaceholder = document.getElementById('video-placeholder');
-  const cameraNameDisplay = document.getElementById('camera-name-display');
-  const ipDisplay = document.getElementById('ip-display');
-  const motionStatus = document.getElementById('motion-status');
-  const sdStatus = document.getElementById('sd-status');
-  const sftpStatus = document.getElementById('sftp-status');
-  const deviceNameInput = document.getElementById('device-name-input');
-  const saveDeviceNameBtn = document.getElementById('save-device-name');
-  const ipValue = document.getElementById('ip-value');
-  const sdInfo = document.getElementById('sd-info');
-  const rebootBtn = document.getElementById('reboot-btn');
-  const resetBtn = document.getElementById('reset-sensor');
-
-  let isStreaming = false;
-  let lastFrameTime = Date.now();
-  let bitrateInterval;
-
-  const toggleSettings = (show) => {
-    if (show) {
-      settingsDrawer.classList.add('active');
-      backdrop.classList.add('active');
-    } else {
-      settingsDrawer.classList.remove('active');
-      backdrop.classList.remove('active');
-    }
-  };
-
-  const updateBitrate = () => {
-    const now = Date.now();
-    const delta = (now - lastFrameTime) / 1000;
-    if (delta >= 1 && bitrateDisplay) {
-      const mockBitrate = (Math.random() * 500 + 1200).toFixed(2);
-      bitrateDisplay.textContent = `${mockBitrate} kbps`;
-      lastFrameTime = now;
-    }
-  };
-
-  const updateTimestamp = () => {
-    if (!isStreaming || !timestampOverlay) return;
-    const now = new Date();
-    const year = now.getFullYear();
-    const month = String(now.getMonth() + 1).padStart(2, '0');
-    const day = String(now.getDate()).padStart(2, '0');
-    const hours = String(now.getHours()).padStart(2, '0');
-    const minutes = String(now.getMinutes()).padStart(2, '0');
-    const seconds = String(now.getSeconds()).padStart(2, '0');
-    const ampm = now.getHours() >= 12 ? 'pm' : 'am';
-    const days = ['SUN', 'MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT'];
-    const dayName = days[now.getDay()];
-    timestampOverlay.textContent = `${year}/${month}/${day} ${hours}:${minutes}:${seconds} ${ampm} ${dayName}`;
-  };
-
-  setInterval(updateTimestamp, 1000);
-
-  view.addEventListener('load', () => {
-    if (isStreaming) {
-      view.classList.add('active');
-      videoPlaceholder.classList.add('hidden');
-      timestampOverlay.classList.remove('hidden');
-    }
-  });
-
-  view.addEventListener('error', () => {
-    view.classList.remove('active');
-    if (isStreaming) {
-      videoPlaceholder.classList.remove('hidden');
-    }
-  });
-
-  const stopStream = () => {
-    view.src = '';
-    if (view) view.classList.remove('active');
-    isStreaming = false;
-    if (playIcon) playIcon.classList.remove('hidden');
-    if (pauseIcon) pauseIcon.classList.add('hidden');
-    clearInterval(bitrateInterval);
-    if (bitrateDisplay) bitrateDisplay.textContent = 'Ready';
-    if (videoPlaceholder) videoPlaceholder.classList.remove('hidden');
-    if (timestampOverlay) timestampOverlay.classList.add('hidden');
-  };
-
-  const startStream = () => {
-    view.src = `${streamUrl}/stream`;
-    isStreaming = true;
-    if (playIcon) playIcon.classList.add('hidden');
-    if (pauseIcon) pauseIcon.classList.remove('hidden');
-    lastFrameTime = Date.now();
-    bitrateInterval = setInterval(updateBitrate, 1000);
-  };
-
-  if (toggleStreamBtn) {
-    toggleStreamBtn.onclick = () => {
-      if (isStreaming) stopStream();
-      else startStream();
-    };
-  }
-
-  if (getStillBtn) {
-    getStillBtn.onclick = () => {
-      isStreaming = false;
-      if (playIcon) playIcon.classList.remove('hidden');
-      if (pauseIcon) pauseIcon.classList.add('hidden');
-      clearInterval(bitrateInterval);
-      if (bitrateDisplay) bitrateDisplay.textContent = 'Ready';
-      if (timestampOverlay) timestampOverlay.classList.add('hidden');
       
-      view.src = `${baseHost}/capture?_cb=${Date.now()}`;
-      view.classList.add('active');
-      if (videoPlaceholder) videoPlaceholder.classList.add('hidden');
-    };
-  }
+      <div class="section">
+        <label class="section-label">Quality</label>
+        <div class="control-input">
+          <input type="range" id="quality" min="10" max="63" value="8" class="default-action">
+          <span class="slider-value" id="quality-val">8</span>
+        </div>
+      </div>
 
-  fullscreenBtn.onclick = () => {
-    if (videoContainer.requestFullscreen) {
-      videoContainer.requestFullscreen();
-    } else if (videoContainer.webkitRequestFullscreen) {
-      videoContainer.webkitRequestFullscreen();
-    } else if (videoContainer.msRequestFullscreen) {
-      videoContainer.msRequestFullscreen();
-    }
-  };
+      <div class="section">
+        <label class="section-label">Presets</label>
+        <div class="button-group">
+          <button id="preset-smooth" class="small flex-1">⚡ Fast</button>
+          <button id="preset-balanced" class="small flex-1 secondary">⚙ Balanced</button>
+          <button id="preset-detail" class="small flex-1">✨ Quality</button>
+        </div>
+      </div>
 
-  openSettingsBtn.onclick = () => toggleSettings(true);
-  closeSettingsBtn.onclick = () => toggleSettings(false);
-  backdrop.onclick = () => toggleSettings(false);
+      <div class="section">
+        <label class="section-label">Features</label>
+        <div class="control-input toggle-switch">
+          <label>Motion Detection</label>
+          <label class="switch">
+            <input id="motion_enabled" type="checkbox" checked class="default-action">
+            <span class="switch-slider"></span>
+          </label>
+        </div>
+        <div class="control-input toggle-switch">
+          <label>Flashlight</label>
+          <label class="switch">
+            <input id="flash_master" type="checkbox">
+            <span class="switch-slider"></span>
+          </label>
+        </div>
+      </div>
+    </div>
 
-  document.querySelectorAll('.default-action').forEach(el => {
-    el.onchange = () => {
-      let value = el.type === 'checkbox' ? (el.checked ? 1 : 0) : el.value;
-      let url = `${baseHost}/control?var=${el.id}&val=${value}`;
-      if (el.id === 'motion_enabled') {
-        url = `${baseHost}/motion-control?enabled=${value}`;
-      }
-      fetch(url).then(() => {
-        if (el.id === 'framesize') {
-          const sizes = { '8': 'VGA', '9': 'SVGA', '10': 'XGA', '11': 'HD' };
-          qualityBadge.textContent = sizes[value] || 'Custom';
-        }
-      });
-    };
-  });
+    <!-- IMAGE TAB -->
+    <div class="tab-content" id="image-tab">
+      <div class="section">
+        <label class="section-label">Brightness</label>
+        <div class="control-input">
+          <input type="range" id="brightness" min="-2" max="2" value="0" class="default-action">
+        </div>
+      </div>
+      <div class="section">
+        <label class="section-label">Contrast</label>
+        <div class="control-input">
+          <input type="range" id="contrast" min="-2" max="2" value="0" class="default-action">
+        </div>
+      </div>
+      <div class="section">
+        <label class="section-label">Saturation</label>
+        <div class="control-input">
+          <input type="range" id="saturation" min="-2" max="2" value="0" class="default-action">
+        </div>
+      </div>
+      <div class="section">
+        <label class="section-label">Special Effect</label>
+        <select id="special_effect" class="default-action">
+          <option value="0" selected>None</option>
+          <option value="1">Negative</option>
+          <option value="2">Grayscale</option>
+          <option value="3">Red Tint</option>
+          <option value="4">Green Tint</option>
+          <option value="5">Blue Tint</option>
+          <option value="6">Sepia</option>
+        </select>
+      </div>
+      <div class="control-input toggle-switch">
+        <label>H-Mirror</label>
+        <label class="switch">
+          <input id="hmirror" type="checkbox" class="default-action">
+          <span class="switch-slider"></span>
+        </label>
+      </div>
+      <div class="control-input toggle-switch">
+        <label>V-Flip</label>
+        <label class="switch">
+          <input id="vflip" type="checkbox" class="default-action">
+          <span class="switch-slider"></span>
+        </label>
+      </div>
+    </div>
 
-  document.getElementById('flash_manual').onchange = (e) => {
-    fetch(`${baseHost}/flash-control?manual=${e.target.checked ? 1 : 0}`);
-  };
+    <!-- ADVANCED TAB -->
+    <div class="tab-content" id="advanced-tab">
+      <div class="section">
+        <label class="section-label">White Balance</label>
+        <div class="control-input toggle-switch">
+          <label>AWB</label>
+          <label class="switch">
+            <input id="awb" type="checkbox" checked class="default-action">
+            <span class="switch-slider"></span>
+          </label>
+        </div>
+        <select id="wb_mode" class="default-action">
+          <option value="0" selected>Auto</option>
+          <option value="1">Sunny</option>
+          <option value="2">Cloudy</option>
+          <option value="3">Office</option>
+          <option value="4">Home</option>
+        </select>
+      </div>
+      <div class="section">
+        <label class="section-label">Exposure</label>
+        <div class="control-input toggle-switch">
+          <label>AEC</label>
+          <label class="switch">
+            <input id="aec" type="checkbox" checked class="default-action">
+            <span class="switch-slider"></span>
+          </label>
+        </div>
+        <div class="control-input" id="aec_value-group" style="display:none">
+          <label>Exposure Value</label>
+          <input type="range" id="aec_value" min="0" max="1200" value="300" class="default-action">
+        </div>
+      </div>
+      <div class="section">
+        <label class="section-label">Gain</label>
+        <div class="control-input toggle-switch">
+          <label>AGC</label>
+          <label class="switch">
+            <input id="agc" type="checkbox" checked class="default-action">
+            <span class="switch-slider"></span>
+          </label>
+        </div>
+        <div class="control-input" id="gainceiling-group" style="display:none">
+          <label>Gain Ceiling</label>
+          <input type="range" id="gainceiling" min="0" max="6" value="0" class="default-action">
+        </div>
+      </div>
+      <div class="control-input toggle-switch">
+        <label>BPC</label>
+        <label class="switch">
+          <input id="bpc" type="checkbox" class="default-action">
+          <span class="switch-slider"></span>
+        </label>
+      </div>
+    </div>
 
-  document.getElementById('sftp_enabled').onchange = (e) => {
-    fetch(`${baseHost}/sftp-control?enabled=${e.target.checked ? 1 : 0}`)
-      .then(r => r.json())
-      .then(data => {
-        if (data.success) {
-          console.log('SFTP ' + (e.target.checked ? 'enabled' : 'disabled'));
-          loadStatus(); // Refresh status display
-        }
-      });
-  };
+    <!-- STORAGE TAB -->
+    <div class="tab-content" id="storage-tab">
+      <div class="section">
+        <label class="section-label">SD Card</label>
+        <div style="padding:8px;background:var(--secondary-bg);border-radius:8px;margin-bottom:12px;font-size:12px;color:var(--text-secondary)">
+          <div id="sd-info">Loading...</div>
+        </div>
+        <div class="button-group">
+          <button id="clear_sd" class="danger small flex-1">🗑 Clear</button>
+          <button id="format_sd" class="danger small flex-1">⚠️ Format</button>
+        </div>
+        <div id="sd_status" style="font-size:12px;color:var(--text-muted);margin-top:8px;text-align:center;min-height:16px"></div>
+      </div>
+    </div>
+  </div>
+</div>
+</div>
 
-  saveDeviceNameBtn.onclick = () => {
-    const name = deviceNameInput.value.trim();
-    if (!name) return;
-    fetch(`${baseHost}/device-name?name=${encodeURIComponent(name)}`)
-      .then(r => r.json())
-      .then(data => {
-        if (data.success) {
-          cameraNameDisplay.textContent = name;
-          alert('Name saved!');
-        }
-      });
-  };
+<!-- MOBILE TOGGLE -->
+<button class="mobile-toggle" id="mobile-toggle" style="display:none">⚙️</button>
+<div class="mobile-backdrop" id="mobile-backdrop"></div>
+<script>
+document.addEventListener('DOMContentLoaded',function(){
+const baseHost=document.location.origin;
+let flashMotionState=true; // preserve motion indicator state
+const view=document.getElementById('stream');
+const streamContainer=document.getElementById('stream-container');
+const stillButton=document.getElementById('get-still');
+const streamButton=document.getElementById('toggle-stream');
+const rightPanel=document.getElementById('right-panel');
+const rightToggle=document.getElementById('right-toggle');
+let isStreaming=false;
+// Image placeholder management
+view.addEventListener('load',()=>{
+if(view.src&&view.src!==window.location.href){
+streamContainer.classList.remove('no-image');
+}
+});
+view.addEventListener('error',()=>{
+streamContainer.classList.add('no-image');
+});
+// Initialize with placeholder
+streamContainer.classList.add('no-image');
+const hide=el=>el.classList.add('hidden');
+const show=el=>el.classList.remove('hidden');
+const updateValue=(el,value,updateRemote)=>{
+updateRemote=updateRemote==null?true:updateRemote;
+let initialValue;
+if(el.type==='checkbox'){
+initialValue=el.checked;
+value=!!value;
+el.checked=value;
+}else{
+initialValue=el.value;
+el.value=value;
+}
+if(updateRemote&&initialValue!==value){
+updateConfig(el);
+}
+};
+function updateConfig(el){
+let value;
+switch(el.type){
+case 'checkbox':value=el.checked?1:0;break;
+case 'range':
+case 'select-one':value=el.value;break;
+default:return;
+}
+const query=`${baseHost}/control?var=${el.id}&val=${value}`;
+fetch(query).then(response=>{
+console.log(`Control updated: ${el.id}=${value}`);
+});
+}
+// Status helpers
+const statusPill=document.getElementById('status-pill');
+const statusText=document.getElementById('status-text');
+const wifiStatus=document.getElementById('wifi-status');
+const mqttStatus=document.getElementById('mqtt-status');
+const setPill=(mode,text)=>{
+ if(!statusPill||!statusText)return;
+ statusPill.classList.remove('status-ok','status-warn','status-bad');
+ statusPill.classList.add(mode);
+ statusText.textContent=text;
+};
+const setConnectivity=(rssi,mqtt)=>{
+ if(wifiStatus){
+ let wifiLabel='--';
+ let wifiClass='status-warn';
+ if(typeof rssi==='number'){
+ wifiLabel=`WiFi: ${rssi} dBm`;
+ wifiClass=rssi>-60?'status-ok':(rssi>-75?'status-warn':'status-bad');
+ }
+ wifiStatus.textContent=wifiLabel;
+ wifiStatus.className=wifiClass;
+ }
+ if(mqttStatus){
+ mqttStatus.textContent=`MQTT: ${mqtt?"Connected":"Disconnected"}`;
+ mqttStatus.className=mqtt?'status-ok':'status-bad';
+ }
+};
+// Panel toggle (works for both desktop collapsed and mobile slide-in)
+const backdrop=document.getElementById('mobile-backdrop');
+rightToggle.onclick=()=>{
+ if(window.innerWidth<=768){
+ rightPanel.classList.toggle('mobile-visible');
+ backdrop.classList.toggle('visible');
+ } else {
+ rightPanel.classList.toggle('collapsed');
+ }
+};
+// Close panel when clicking backdrop
+backdrop.onclick=()=>{
+ rightPanel.classList.remove('mobile-visible');
+ backdrop.classList.remove('visible');
+};
+// Load initial settings and device info
+fetch(`${baseHost}/status`).then(response=>response.json()).then(state=>{
+document.querySelectorAll('.default-action').forEach(el=>{
+updateValue(el,state[el.id],false);
+});
+if(state.motion_enabled!==undefined){
+document.getElementById('motion_enabled').checked=state.motion_enabled;
+}
+if(state.flash_manual!==undefined){
+document.getElementById('flash_master').checked=state.flash_manual;
+}
+if(state.flash_motion!==undefined){
+flashMotionState=!!state.flash_motion;
+}
+// Display device name and chip ID
+if(state.device_name){
+document.getElementById('device-name').textContent=state.device_name;
+const topBarName=document.getElementById('device-name-bar');
+if(topBarName) topBarName.textContent=state.device_name;
+}
+if(state.chip_id){
+const shortId=state.chip_id.substring(0,8).toUpperCase();
+document.getElementById('device-id').textContent=shortId;
+}
+if(state.framesize!==undefined){
+updateValue(document.getElementById('framesize'),state.framesize,false);
+}
+if(state.quality!==undefined){
+updateValue(document.getElementById('quality'),state.quality,false);
+}
+if(state.camera_ready){
+setPill('status-ok','Ready');
+} else {
+// Show "Initializing..." for first 10 seconds, then "Camera not ready"
+const uptime = state.uptime || 0;
+if (uptime < 10) {
+setPill('status-warn','Initializing...');
+} else {
+setPill('status-warn','Camera not ready');
+}
+}
+setConnectivity(state.wifi_rssi,state.mqtt_connected);
+// Hide flash LED controls if board doesn't have flash LED
+if(state.has_flash_led===false){
+const flashTitle=document.getElementById('flash-section-title');
+const flashGroup=document.getElementById('flash_master-group');
+if(flashTitle)flashTitle.style.display='none';
+if(flashGroup)flashGroup.style.display='none';
+}
+}).catch(err=>{
+console.error('Status load failed',err);
+});
+// Poll status every 2 seconds to update camera ready status and connectivity
+setInterval(()=>{
+fetch(`${baseHost}/status`).then(response=>response.json()).then(state=>{
+if(state.camera_ready){
+setPill('status-ok','Ready');
+} else {
+// Show "Initializing..." for first 10 seconds, then "Camera not ready"
+const uptime = state.uptime || 0;
+if (uptime < 10) {
+setPill('status-warn','Initializing...');
+} else {
+setPill('status-warn','Camera not ready');
+}
+}
+setConnectivity(state.wifi_rssi,state.mqtt_connected);
+}).catch(err=>{
+console.error('Status poll failed',err);
+});
+},2000);
+// Stream controls
+const stopStream=()=>{
+view.src='';
+streamContainer.classList.add('no-image');
+streamButton.textContent='Start Stream';
+isStreaming=false;
+ setPill('status-ok','Ready');
+};
+const startStream=()=>{
+view.src=`${baseHost}/stream`;
+streamButton.textContent='Stop Stream';
+isStreaming=true;
+ setPill('status-ok','Streaming');
+};
+stillButton.onclick=()=>{
+stopStream();
+fetch(`${baseHost}/capture?_cb=${Date.now()}`)
+.then(response=>{
+const savedToSD=response.headers.get('X-SD-Saved');
+if(savedToSD==='true'){
+setPill('status-ok','Saved to SD');
+setTimeout(()=>setPill('status-ok','Ready'),2000);
+}else if(savedToSD==='false'){
+setPill('status-warn','SD save failed');
+setTimeout(()=>setPill('status-ok','Ready'),2000);
+}
+return response.blob();
+})
+.then(blob=>{
+view.src=URL.createObjectURL(blob);
+})
+.catch(err=>{
+console.error('Capture failed:',err);
+setPill('status-bad','Capture failed');
+setTimeout(()=>setPill('status-ok','Ready'),2000);
+});
+};
+streamButton.onclick=()=>{
+isStreaming?stopStream():startStream();
+};
+// Control listeners
+document.querySelectorAll('.default-action').forEach(el=>{
+el.onchange=()=>updateConfig(el);
+});
+// Conditional visibility
+const agc=document.getElementById('agc');
+const gainCeiling=document.getElementById('gainceiling-group');
+agc.onchange=()=>{
+updateConfig(agc);
+agc.checked?show(gainCeiling):hide(gainCeiling);
+};
+const aec=document.getElementById('aec');
+const exposure=document.getElementById('aec_value-group');
+aec.onchange=()=>{
+updateConfig(aec);
+aec.checked?hide(exposure):show(exposure);
+};
+const awbGain=document.getElementById('awb_gain');
+const wbMode=document.getElementById('wb_mode-group');
+awbGain.onchange=()=>{
+updateConfig(awbGain);
+awbGain.checked?show(wbMode):hide(wbMode);
+};
+// Motion toggle
+const motionToggle=document.getElementById('motion_enabled');
+motionToggle.onchange=()=>{
+const enabled=motionToggle.checked?1:0;
+fetch(`${baseHost}/motion-control?enabled=${enabled}`).then(response=>response.json()).catch(err=>console.error('Motion control failed:',err));
+};
+// Flash toggle (manual flashlight on/off)
+const flashMasterToggle=document.getElementById('flash_master');
+flashMasterToggle.onchange=()=>{
+const manual=flashMasterToggle.checked?1:0;
+console.log(`[FLASH] Manual toggle changed: manual=${manual}`);
+fetch(`${baseHost}/flash-control?manual=${manual}`).then(response=>response.json()).then(data=>{console.log('[FLASH] Server response:',data);}).catch(err=>console.error('[FLASH] Control failed:',err));
+};
+// Presets
+const setAndPush=(id,val)=>{
+const el=document.getElementById(id);
+if(!el) return;
+updateValue(el,val,true);
+};
 
-  if (rebootBtn) {
-    rebootBtn.onclick = () => {
-      if (confirm('Reboot the device? You will need to reconnect.')) {
-        fetch(`${baseHost}/control?var=reboot&val=1`).then(() => {
-          alert('Rebooting device...');
-          setTimeout(() => location.reload(), 5000);
-        });
-      }
-    };
-  }
-
-  resetBtn.onclick = () => {
-    if (confirm('Reset camera settings to defaults?')) {
-      fetch(`${baseHost}/control?var=reset&val=1`).then(() => {
-        alert('Camera settings reset. Reloading...');
-        setTimeout(() => location.reload(), 1000);
-      });
-    }
-  };
-
-  const loadStatus = () => {
-    fetch(`${baseHost}/status`)
-      .then(r => r.json())
-      .then(state => {
-        document.querySelectorAll('.default-action, #flash_manual').forEach(el => {
-          if (state.hasOwnProperty(el.id)) {
-            if (el.type === 'checkbox') el.checked = !!state[el.id];
-            else el.value = state[el.id];
-          }
-        });
-        if (state.device_name) {
-          cameraNameDisplay.textContent = state.device_name;
-          deviceNameInput.value = state.device_name;
-        }
-        const ip = state.ip || location.hostname;
-        ipValue.textContent = ip;
-        ipDisplay.textContent = ip;
-        const motionEnabled = !!state.motion_enabled;
-        motionStatus.textContent = motionEnabled ? '● Motion' : '○ Motion';
-        motionStatus.style.color = motionEnabled ? 'var(--success)' : 'var(--text-muted)';
-        
-        if (state.sd_ready) {
-          const used = (state.sd_used_mb || 0).toFixed(1);
-          const total = (state.sd_size_mb || 0).toFixed(1);
-          sdStatus.textContent = `💾 ${used}/${total}MB`;
-          sdStatus.style.color = 'var(--accent-cyan)';
-        } else {
-          sdStatus.textContent = '💾 None';
-          sdStatus.style.color = 'var(--text-muted)';
-        }
-        
-        // Update SFTP status
-        if (state.sftp_enabled) {
-          const success = state.sftp_success_count || 0;
-          const fail = state.sftp_fail_count || 0;
-          const fallback = state.sftp_fallback_count || 0;
-          sftpStatus.textContent = `📤 ✓${success}/✗${fail}/⇓${fallback}`;
-          sftpStatus.style.color = fail > 0 ? 'var(--error)' : 'var(--success)';
-        } else {
-          sftpStatus.textContent = '📤 Off';
-          sftpStatus.style.color = 'var(--text-muted)';
-        }
-        
-        const sizes = { '8': 'VGA', '9': 'SVGA', '10': 'XGA', '11': 'HD' };
-        qualityBadge.textContent = sizes[state.framesize] || 'Custom';
-        if (state.sd_ready) {
-          const used = (state.sd_used_mb || 0).toFixed(1);
-          const total = (state.sd_size_mb || 0).toFixed(1);
-          sdInfo.textContent = `${used}MB / ${total}MB`;
-        } else {
-          sdInfo.textContent = 'No SD Card';
-        }
-      });
-  };
-
-  loadStatus();
-  setInterval(loadStatus, 10000);
+// SD clear button
+const clearSdBtn=document.getElementById('clear_sd');
+const formatSdBtn=document.getElementById('format_sd');
+const sdStatus=document.getElementById('sd_status');
+if(clearSdBtn){
+clearSdBtn.onclick=()=>{
+if(!confirm('Delete all captures on SD card?')) return;
+clearSdBtn.disabled=true;
+sdStatus.textContent='Clearing...';
+sdStatus.style.color='#ffa500'; // Orange
+fetch(`${baseHost}/captures/clear`).then(r=>r.json()).then(res=>{
+if(res.status==='cleared'){
+sdStatus.textContent='✓ Cleared successfully';
+sdStatus.style.color='#4CAF50'; // Green
+setTimeout(()=>{sdStatus.textContent='';},3000);
+} else if(res.status==='sd_not_ready'){
+sdStatus.textContent='✗ SD card not ready';
+sdStatus.style.color='#f44336'; // Red
+setTimeout(()=>{sdStatus.textContent='';},5000);
+} else {
+sdStatus.textContent='✗ Error: '+res.status;
+sdStatus.style.color='#f44336'; // Red
+setTimeout(()=>{sdStatus.textContent='';},5000);
+}
+}).catch(err=>{
+console.error('SD clear failed:',err);
+sdStatus.textContent='✗ Network error';
+sdStatus.style.color='#f44336'; // Red
+setTimeout(()=>{sdStatus.textContent='';},5000);
+}).finally(()=>{
+clearSdBtn.disabled=false;
+});
+};
+}
+if(formatSdBtn){
+formatSdBtn.onclick=async()=>{
+if(!confirm('⚠️ WARNING: FORMAT WILL REBOOT THE DEVICE!\n\nThis will:\n• REBOOT the camera immediately\n• ERASE ALL DATA on the SD card\n• Take about 10 seconds to complete\n\nContinue with format?')) return;
+formatSdBtn.disabled=true;
+clearSdBtn.disabled=true;
+sdStatus.textContent='⟳ Rebooting to format...';
+sdStatus.style.color='#ffa500';
+try{
+const formData=new FormData();
+formData.append('confirm','yes');
+const res=await(await fetch(`${baseHost}/sd/format`,{method:'POST',body:formData})).json();
+if(res.status==='rebooting_to_format'){
+sdStatus.textContent='⟳ Device rebooting - please wait...';
+setTimeout(()=>{location.reload();},10000);
+} else {
+sdStatus.textContent='✗ Format failed: '+res.status;
+sdStatus.style.color='#f44336';
+formatSdBtn.disabled=false;
+clearSdBtn.disabled=false;
+}
+}catch(err){
+console.error('Format error:',err);
+sdStatus.textContent='⟳ Device rebooting (connection lost)...';
+setTimeout(()=>{location.reload();},10000);
+}
+};
+}
+// Fast: Low res, high compression, minimal latency
+document.getElementById('preset-smooth').onclick=()=>{
+setAndPush('framesize','5');
+setAndPush('quality','12');
+setAndPush('aec','1');
+setAndPush('aec_value','200');
+setAndPush('gainceiling','1');
+};
+// Default: Balanced quality and speed (recommended)
+document.getElementById('preset-balanced').onclick=()=>{
+setAndPush('framesize','8');
+setAndPush('quality','8');
+setAndPush('aec','1');
+setAndPush('aec_value','300');
+setAndPush('gainceiling','2');
+};
+// High-Quality: Maximum image detail, slower
+document.getElementById('preset-detail').onclick=()=>{
+setAndPush('framesize','9');
+setAndPush('quality','5');
+setAndPush('aec','1');
+setAndPush('aec_value','300');
+setAndPush('gainceiling','3');
+};
+// Reset Sensor: Revert all hardware settings to defaults
+document.getElementById('reset-sensor').onclick=()=>{
+if(!confirm('Reset all camera sensor settings to defaults?')) return;
+fetch(`${baseHost}/control?var=reset&val=1`).then(()=>{
+setTimeout(()=>{location.reload();},500);
+});
+};
+// Tab switching
+document.querySelectorAll('.tab-btn').forEach(btn=>{
+btn.onclick=()=>{
+document.querySelectorAll('.tab-btn').forEach(b=>b.classList.remove('active'));
+document.querySelectorAll('.tab-content').forEach(c=>c.classList.remove('active'));
+btn.classList.add('active');
+document.getElementById(btn.dataset.tab+'-tab').classList.add('active');
+};
+});
+// IP address copy
+const ipCopy=document.getElementById('ip-copy');
+if(ipCopy){
+ipCopy.onclick=()=>{
+const ip=document.getElementById('ip-value').textContent;
+navigator.clipboard.writeText(ip);
+const orig=ipCopy.textContent;
+ipCopy.textContent='Copied!';
+setTimeout(()=>{ipCopy.textContent=orig;},1500);
+};
+}
+// Mobile panel toggle
+const controlPanel=document.getElementById('control-panel');
+const mobileToggle=document.getElementById('mobile-toggle');
+const mobileBackdrop=document.getElementById('mobile-backdrop');
+if(window.innerWidth<=768){
+mobileToggle.style.display='flex';
+mobileToggle.onclick=()=>{
+controlPanel.classList.toggle('mobile-visible');
+mobileBackdrop.classList.toggle('visible');
+};
+mobileBackdrop.onclick=()=>{
+controlPanel.classList.remove('mobile-visible');
+mobileBackdrop.classList.remove('visible');
+};
+}
+// Load IP address
+fetch(`${baseHost}/status`).then(r=>r.json()).then(s=>{
+if(s.ip)document.getElementById('ip-value').textContent=s.ip;
+}).catch(e=>console.log('IP load failed',e));
 });
 </script>
 </body>
@@ -2543,9 +2415,6 @@ void handleCapture(AsyncWebServerRequest *request) {
 
     captureCount++;
 
-    // Save or upload the image before returning to browser
-    bool saved = saveOrUploadImage(fb, "web_capture");
-
     // Copy the frame so we can safely return the original buffer immediately
     uint8_t *copyBuf = (uint8_t*)malloc(fb->len);
     size_t copyLen = fb->len;
@@ -2560,13 +2429,28 @@ void handleCapture(AsyncWebServerRequest *request) {
     // Return the frame buffer to the camera driver quickly to avoid corruption
     returnFrameBuffer(fb);
 
+    // Save to SD card if available
+    bool sdSaved = false;
+    if (sdReady) {
+        char path[64];
+        snprintf(path, sizeof(path), "%s/%lu_%lu.jpg", SD_CAPTURE_DIR, millis(), captureCount);
+        File file = SD_MMC.open(path, "w");
+        if (file) {
+            file.write(copyBuf, copyLen);
+            file.close();
+            Serial.printf("[SD] Saved capture: %s (%u bytes)\n", path, (unsigned int)copyLen);
+            sdSaved = true;
+        } else {
+            Serial.println("[SD] Failed to write capture");
+        }
+    }
+
     // LED remains in manual state (not controlled by capture)
 
     AsyncWebServerResponse *response = request->beginResponse_P(200, "image/jpeg", copyBuf, copyLen);
     response->addHeader("Content-Disposition", "inline; filename=capture.jpg");
     response->addHeader("Access-Control-Allow-Origin", "*");
-    response->addHeader("X-Saved", saved ? "true" : "false");
-    response->addHeader("X-Storage", sftpEnabled ? (saved ? "sftp" : "sd_fallback") : "sd");
+    response->addHeader("X-SD-Saved", sdSaved ? "true" : "false");
     request->onDisconnect([copyBuf]() {
         free(copyBuf);
     });
@@ -2728,12 +2612,6 @@ void handleControl(AsyncWebServerRequest *request) {
         res = s->set_dcw(s, val);
     } else if (var == "colorbar") {
         res = s->set_colorbar(s, val);
-    } else if (var == "reboot") {
-        Serial.println("[HTTP] Reboot requested");
-        request->send(200, "text/plain", "Rebooting...");
-        delay(100);
-        ESP.restart();
-        return;
     } else if (var == "reset") {
         resetCameraSettings();
         res = 0;
@@ -2856,32 +2734,6 @@ void handleFlashControl(AsyncWebServerRequest *request) {
     JsonDocument doc;
     doc["flash_manual"] = flashManualOn;
     doc["flash_pin"] = FLASH_PIN;
-    doc["status"] = "ok";
-    
-    String output;
-    serializeJson(doc, output);
-    request->send(200, "application/json", output);
-}
-
-void handleSftpControl(AsyncWebServerRequest *request) {
-    if (!request->hasParam("enabled")) {
-        request->send(400, "text/plain", "Missing 'enabled' parameter");
-        return;
-    }
-
-    String enabledParam = request->getParam("enabled")->value();
-    bool newState = (enabledParam == "1" || enabledParam.equalsIgnoreCase("true"));
-    
-    sftpEnabled = newState;
-    saveSftpConfig(newState);
-    
-    Serial.printf("[SFTP] Upload %s via web control\n", newState ? "enabled" : "disabled");
-    
-    JsonDocument doc;
-    doc["sftp_enabled"] = sftpEnabled;
-    doc["sftp_success_count"] = sftpSuccessCount;
-    doc["sftp_fail_count"] = sftpFailCount;
-    doc["sftp_fallback_count"] = sftpFallbackCount;
     doc["status"] = "ok";
     
     String output;

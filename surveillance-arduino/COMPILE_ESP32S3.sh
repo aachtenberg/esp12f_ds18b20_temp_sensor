@@ -18,7 +18,7 @@ echo "   Camera: OV3660 (auto-detected)"
 echo ""
 
 ./bin/arduino-cli compile \
-  --fqbn esp32:esp32:esp32s3:PSRAM=enabled,PartitionScheme=huge_app,FlashMode=qio \
+  --fqbn esp32:esp32:esp32s3:PSRAM=opi,PartitionScheme=huge_app,FlashMode=qio \
   ESP32CAM_Surveillance \
   --verify
 
@@ -32,7 +32,7 @@ echo "   - NVS-based triple-reset detection"
 echo "   - SD_MMC in 1-bit mode (D1/D2/D3 not connected on Freenove board)"
 echo ""
 echo "To upload to device:"
-echo "  ./bin/arduino-cli upload -p /dev/ttyACM0 --fqbn esp32:esp32:esp32s3:PSRAM=enabled,PartitionScheme=huge_app,FlashMode=qio ESP32CAM_Surveillance"
+echo "  ./bin/arduino-cli upload -p /dev/ttyACM0 --fqbn esp32:esp32:esp32s3:PSRAM=opi,PartitionScheme=huge_app,FlashMode=qio ESP32CAM_Surveillance"
 echo ""
 echo "To monitor serial output:"
 echo "  ./bin/arduino-cli monitor -p /dev/ttyACM0 -c baudrate=115200"
