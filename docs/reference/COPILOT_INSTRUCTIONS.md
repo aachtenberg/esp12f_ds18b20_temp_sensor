@@ -155,6 +155,13 @@
 - [ ] All WiFiManager portal and InfluxDB architecture is current
 - [ ] Quick start commands in README match detailed commands in CONFIG.md
 
+## Cross-Build Feature Parity (Surveillance Camera)
+
+- **Source of truth**: Arduino CLI sketch (surveillance-arduino/ESP32CAM_Surveillance) is canonical for shared camera features.
+- **PlatformIO sync**: Mirror common features into surveillance/ (PlatformIO) when they diverge (SD handling, motion storage, web/MQTT endpoints).
+- **Check before edits**: Diff Arduino vs PlatformIO for SD mount order, motion-to-SD saves, MQTT payload fields, and reset/fallback behavior.
+- **Document parity fixes**: When aligning builds, update README or CONFIG only if user-facing commands or behaviors change.
+
 ---
 
 **Remember**: The goal is **maintainable, non-redundant documentation** that provides a clear user journey from project discovery to detailed configuration. Always consider which of the 3 files is the most appropriate home for new information.
