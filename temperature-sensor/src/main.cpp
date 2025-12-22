@@ -102,11 +102,16 @@ unsigned long lastMqttConnectionCheck = 0;  // Track when we last checked MQTT s
 unsigned long lastPublishTime = 0;
 unsigned long lastSuccessfulMqttCheck = 0;
 unsigned long mqttReconnectInterval = 5000;  // Dynamic backoff interval
+unsigned long mqttBackoffResetTime = 0;      // Track when backoff started for periodic reset
+unsigned int mqttConsecutiveFailures = 0;    // Count consecutive connection failures
+int lastMqttState = MQTT_DISCONNECTED;       // Track last known MQTT state for change detection
 const unsigned long MQTT_RECONNECT_INTERVAL_MS = 5000;
-const unsigned long MQTT_RECONNECT_INTERVAL_MAX_MS = 60000;  // Max 60s backoff
+const unsigned long MQTT_RECONNECT_INTERVAL_MAX_MS = 30000;  // Max 30s backoff (reduced from 60s)
 const unsigned long MQTT_CONNECTION_CHECK_INTERVAL_MS = 30000;  // Check connection health every 30s
 const unsigned long MQTT_PUBLISH_INTERVAL_MS = 30000;
 const unsigned long MQTT_STALE_CONNECTION_TIMEOUT_MS = 120000;  // Force reconnect if no activity for 2 mins
+const unsigned long MQTT_BACKOFF_RESET_INTERVAL_MS = 300000;   // Reset backoff to minimum every 5 mins
+const unsigned int MQTT_MAX_CONSECUTIVE_FAILURES = 10;         // Reset backoff after this many failures
 
 // WiFi reconnection tracking
 unsigned long wifiDisconnectedSince = 0;
@@ -301,21 +306,49 @@ String getTopicEvents() {
   return topicBase + "/events";
 }
 
+// Helper to get MQTT state description for logging
+const char* getMqttStateString(int state) {
+  switch (state) {
+    case MQTT_CONNECTION_TIMEOUT: return "CONNECTION_TIMEOUT";
+    case MQTT_CONNECTION_LOST: return "CONNECTION_LOST";
+    case MQTT_CONNECT_FAILED: return "CONNECT_FAILED";
+    case MQTT_DISCONNECTED: return "DISCONNECTED";
+    case MQTT_CONNECTED: return "CONNECTED";
+    case MQTT_CONNECT_BAD_PROTOCOL: return "BAD_PROTOCOL";
+    case MQTT_CONNECT_BAD_CLIENT_ID: return "BAD_CLIENT_ID";
+    case MQTT_CONNECT_UNAVAILABLE: return "UNAVAILABLE";
+    case MQTT_CONNECT_BAD_CREDENTIALS: return "BAD_CREDENTIALS";
+    case MQTT_CONNECT_UNAUTHORIZED: return "UNAUTHORIZED";
+    default: return "UNKNOWN";
+  }
+}
+
 bool ensureMqttConnected() {
   unsigned long now = millis();
-  
+
+  // Log state changes for debugging
+  int currentState = mqttClient.state();
+  if (currentState != lastMqttState) {
+    Serial.printf("[MQTT] State changed: %s -> %s\n",
+                  getMqttStateString(lastMqttState),
+                  getMqttStateString(currentState));
+    lastMqttState = currentState;
+  }
+
   // Check for stale connection: if connected but no successful publish in 2 minutes, force reconnect
   if (mqttClient.connected()) {
-    if (metrics.lastSuccessfulMqttPublish > 0 && 
+    if (metrics.lastSuccessfulMqttPublish > 0 &&
         (now - metrics.lastSuccessfulMqttPublish) > MQTT_STALE_CONNECTION_TIMEOUT_MS) {
       Serial.println("[MQTT] Stale connection detected - forcing reconnect");
-      Serial.printf("[MQTT] Last successful publish was %lu seconds ago\n", 
+      Serial.printf("[MQTT] Last successful publish was %lu seconds ago\n",
                     (now - metrics.lastSuccessfulMqttPublish) / 1000);
       mqttClient.disconnect();
       delay(100);
       // Fall through to reconnection logic below
     } else {
       lastSuccessfulMqttCheck = now;
+      mqttConsecutiveFailures = 0;  // Reset failure count on successful connection
+      mqttBackoffResetTime = 0;     // Reset backoff timer
       return true;
     }
   }
@@ -325,16 +358,37 @@ bool ensureMqttConnected() {
     return false;
   }
 
-  // Rate limit reconnection attempts (but allow first connection at startup)
-  if (lastMqttReconnectAttempt > 0 && (now - lastMqttReconnectAttempt) <= MQTT_RECONNECT_INTERVAL_MS) {
+  // Periodic backoff reset: if we've been failing for too long, reset to try more aggressively
+  if (mqttBackoffResetTime > 0 && (now - mqttBackoffResetTime) > MQTT_BACKOFF_RESET_INTERVAL_MS) {
+    Serial.println("[MQTT] Backoff reset - trying more aggressively");
+    mqttReconnectInterval = MQTT_RECONNECT_INTERVAL_MS;
+    mqttBackoffResetTime = now;
+    mqttConsecutiveFailures = 0;
+  }
+
+  // Also reset backoff after too many consecutive failures (try fresh)
+  if (mqttConsecutiveFailures >= MQTT_MAX_CONSECUTIVE_FAILURES) {
+    Serial.printf("[MQTT] %u consecutive failures - resetting backoff\n", mqttConsecutiveFailures);
+    mqttReconnectInterval = MQTT_RECONNECT_INTERVAL_MS;
+    mqttConsecutiveFailures = 0;
+  }
+
+  // Rate limit reconnection attempts using dynamic backoff interval
+  if (lastMqttReconnectAttempt > 0 && (now - lastMqttReconnectAttempt) < mqttReconnectInterval) {
     return false;
   }
 
   lastMqttReconnectAttempt = now;
-  
-  // Reduced logging - only show connection attempts on failure
+
+  // Start tracking backoff time on first failure
+  if (mqttBackoffResetTime == 0) {
+    mqttBackoffResetTime = now;
+  }
+
   String clientId = String(deviceName) + "-" + chipId;
-  
+  Serial.printf("[MQTT] Attempting connection to %s:%d as %s\n",
+                MQTT_BROKER, MQTT_PORT, clientId.c_str());
+
   // Connect anonymously if no credentials provided, otherwise use authentication
   bool connected;
   if (strlen(MQTT_USER) == 0) {
@@ -342,14 +396,20 @@ bool ensureMqttConnected() {
   } else {
     connected = mqttClient.connect(clientId.c_str(), MQTT_USER, MQTT_PASSWORD);
   }
-  
+
   if (connected) {
     Serial.println("[MQTT] Connected to broker");
     lastSuccessfulMqttCheck = now;
     mqttReconnectInterval = MQTT_RECONNECT_INTERVAL_MS;  // Reset backoff on success
+    mqttConsecutiveFailures = 0;
+    mqttBackoffResetTime = 0;
+    lastMqttState = MQTT_CONNECTED;
   } else {
-    Serial.printf("[MQTT] Connection failed (state: %d), retry in %lu seconds\n", 
-                  mqttClient.state(), mqttReconnectInterval / 1000);
+    mqttConsecutiveFailures++;
+    int state = mqttClient.state();
+    Serial.printf("[MQTT] Connection failed: %s (state: %d), failures: %u, retry in %lu sec\n",
+                  getMqttStateString(state), state, mqttConsecutiveFailures,
+                  mqttReconnectInterval / 1000);
     metrics.mqttPublishFailures++;
     // Exponential backoff: double interval up to max
     mqttReconnectInterval = min(mqttReconnectInterval * 2, MQTT_RECONNECT_INTERVAL_MAX_MS);
@@ -701,7 +761,7 @@ void setup() {
   mqttClient.setBufferSize(1024);  // Standard buffer for ESP8266
 #endif
   mqttClient.setKeepAlive(30);
-  mqttClient.setSocketTimeout(15);
+  mqttClient.setSocketTimeout(5);  // Reduced from 15s to minimize blocking during connection issues
 
   // Start up the DS18B20 library
   sensors.begin();
@@ -756,12 +816,20 @@ void loop() {
   // Must call drd->loop() to keep double reset detection working
   drd->loop();
 
-  // Handle web requests
+  // Handle web requests first for responsiveness
   server.handleClient();
 
-  mqttClient.loop();
+  // Process MQTT messages - detect connection loss early
+  if (!mqttClient.loop()) {
+    // loop() returns false if disconnected - log state change immediately
+    int currentState = mqttClient.state();
+    if (currentState != lastMqttState && lastMqttState == MQTT_CONNECTED) {
+      Serial.printf("[MQTT] Connection lost! State: %s (%d)\n",
+                    getMqttStateString(currentState), currentState);
+      lastMqttState = currentState;
+    }
+  }
 
-  // Periodic WiFi check
   unsigned long now = millis();
 
   // MQTT connection management - check health periodically (catches stale connections)
@@ -769,11 +837,9 @@ void loop() {
     lastMqttConnectionCheck = now;
     ensureMqttConnected();  // This checks for stale connections even if "connected"
   }
-  
-  // Immediate reconnect if definitely disconnected
-  if (!mqttClient.connected() && (now - lastMqttReconnectAttempt) > mqttReconnectInterval) {
-    lastMqttReconnectAttempt = now;
-    Serial.println("[MQTT] Not connected, attempting reconnect...");
+
+  // Reconnect if disconnected, respecting backoff interval
+  if (!mqttClient.connected() && (now - lastMqttReconnectAttempt) >= mqttReconnectInterval) {
     ensureMqttConnected();
   }
 
@@ -853,16 +919,29 @@ void loop() {
     lastPublishTime = now;
   }
 
-  // Periodic status heartbeat (helps diagnose connectivity) - reduced frequency
-  if (now - lastStatusLog >= 30000) {  // Changed from 5000ms to 30000ms (30 seconds)
+  // Periodic status heartbeat (helps diagnose connectivity)
+  if (now - lastStatusLog >= 30000) {
     bool wifiConnected = (WiFi.status() == WL_CONNECTED);
     int rssi = wifiConnected ? WiFi.RSSI() : -999;
     IPAddress ip = wifiConnected ? WiFi.localIP() : IPAddress(0,0,0,0);
-    Serial.printf("[Status] WiFi:%s RSSI:%d IP:%s | MQTT:%s | OTA:ready\n",
-                  wifiConnected ? "connected" : "disconnected",
+    bool mqttConnected = mqttClient.connected();
+    int mqttState = mqttClient.state();
+
+    Serial.printf("[Status] WiFi:%s RSSI:%d IP:%s | MQTT:%s(%s) failures:%u backoff:%lus\n",
+                  wifiConnected ? "OK" : "DOWN",
                   rssi,
                   wifiConnected ? ip.toString().c_str() : "0.0.0.0",
-                  mqttClient.connected() ? "connected" : "disconnected");
+                  mqttConnected ? "OK" : "DOWN",
+                  getMqttStateString(mqttState),
+                  mqttConsecutiveFailures,
+                  mqttReconnectInterval / 1000);
+
+    // Log last successful publish age if having issues
+    if (!mqttConnected && metrics.lastSuccessfulMqttPublish > 0) {
+      unsigned long publishAge = (now - metrics.lastSuccessfulMqttPublish) / 1000;
+      Serial.printf("[Status] Last MQTT publish: %lu sec ago | Total failures: %u\n",
+                    publishAge, metrics.mqttPublishFailures);
+    }
     lastStatusLog = now;
   }
 
