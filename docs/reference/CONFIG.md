@@ -198,6 +198,37 @@ ESP8266 RST pin ──► 10KΩ resistor ──► ESP8266 GPIO 16 (D0)
 
 **Testing**: After hardware mod, device will wake up reliably from deep sleep
 
+### ESP8266/ESP32 MQTT 12-Hour Reconnection Timeout
+**Symptom**: Devices lose MQTT connection after 12+ hours of operation and never reconnect
+
+**Root Cause**: Complex exponential backoff state machine with multiple variables that corrupts after extended operation
+
+**Fixed in v1.1.0** (Dec 23, 2025):
+- Simplified to fixed 5-second reconnection retry interval
+- Removed 6 state variables (`mqttReconnectInterval`, `mqttBackoffResetTime`, etc)
+- Added heap monitoring for ESP8266 memory exhaustion detection
+- All devices now use predictable reconnection with no exponential backoff
+
+**Changes**:
+```cpp
+// Old: Complex backoff (BROKEN)
+if (!mqttClient.connected() && (now - lastMqttReconnectAttempt) >= mqttReconnectInterval) {
+  ensureMqttConnected();  // mqttReconnectInterval grows exponentially
+}
+
+// New: Simple fixed interval (RELIABLE)
+if (!mqttClient.connected() && (now - lastMqttReconnectAttempt) >= MQTT_RECONNECT_INTERVAL_MS) {
+  ensureMqttConnected();  // Always 5 seconds, no state corruption
+}
+```
+
+**Verification**: Check firmware version is `1.1.0-build20251223` or later
+```bash
+curl http://<device-ip>/health | jq '.firmware_version'
+```
+
+**Testing**: Device should maintain MQTT connection indefinitely with 5-second reconnection on failure
+
 ### MQTT Buffer Size Issues
 **Symptom**: Device reports successful MQTT publishes but messages don't appear in broker
 
