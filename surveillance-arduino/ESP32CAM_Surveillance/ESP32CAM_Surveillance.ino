@@ -102,6 +102,9 @@ unsigned long sftpFallbackCount = 0;
 bool sdReady = false;
 const char* SD_CAPTURE_DIR = "/captures";
 
+// LittleFS state (mounted once in setup, avoids repeated begin() calls)
+bool littleFsReady = false;
+
 // Global objects
 WiFiClient espClient;
 PubSubClient mqttClient(espClient);
@@ -128,6 +131,9 @@ unsigned long captureCount = 0;
 unsigned long cameraErrors = 0;
 unsigned long mqttPublishCount = 0;
 
+// Stream client tracking
+volatile int activeStreamClients = 0;
+
 // Camera motion detection
 uint8_t* previousFrame = NULL;
 size_t previousFrameSize = 0;
@@ -144,7 +150,7 @@ void saveSftpConfig(bool enabled);
 void getDeviceChipId();
 void getDeviceMacAddress();
 void IRAM_ATTR motionISR();
-bool checkCameraMotion();
+bool checkCameraMotion(camera_fb_t** outFrame = NULL);
 void setupWiFi();
 void setupSD();
 bool deleteOldestCaptures(int count);
@@ -208,6 +214,15 @@ void setup() {
     Serial.println("[SETUP] Starting initialization...");
 
     // Removed: reset check now runs at the very start to ensure window timing works
+
+    // Initialize LittleFS once (used for config storage)
+    Serial.println("[SETUP] Mounting LittleFS...");
+    littleFsReady = LittleFS.begin(true);  // true = format if needed
+    if (!littleFsReady) {
+        Serial.println("[SETUP] WARNING: LittleFS mount failed!");
+    } else {
+        Serial.println("[SETUP] LittleFS mounted successfully");
+    }
 
     // Load device name from filesystem
     Serial.println("[SETUP] Loading device name...");
@@ -359,39 +374,44 @@ void loop() {
     // Camera-based motion detection (throttled to every 3 seconds)
     if (motionEnabled && cameraReady) {
         if (currentMillis - lastMotionCheck >= MOTION_CHECK_INTERVAL) {
-            if (checkCameraMotion()) {
-                // Capture and save/upload image
-                camera_fb_t* fb = capturePhoto();
-                if (fb) {
-                    bool saved = saveOrUploadImage(fb, "motion");
-                    returnFrameBuffer(fb);
-                    
-                    // Motion detected - publish to MQTT with storage info
-                    if (mqttConnected) {
-                        JsonDocument doc;
-                        doc["device"] = deviceName;
-                        doc["motion"] = true;
-                        doc["timestamp"] = currentMillis / 1000;
-                        doc["count"] = motionDetectCount;
-                        doc["storage"] = sftpEnabled ? (saved ? "sftp" : "sd_fallback") : "sd";
-                        doc["saved"] = saved;
-                        doc["sftp_enabled"] = sftpEnabled;
-
-                        String output;
-                        serializeJson(doc, output);
-
-                        String topic = String(MQTT_TOPIC_BASE) + "/" + deviceName + "/motion";
-                        mqttClient.publish(topic.c_str(), output.c_str(), false);
-                        Serial.println("[Motion] Published to MQTT");
-                    }
+            camera_fb_t* motionFrame = NULL;
+            if (checkCameraMotion(&motionFrame)) {
+                // Motion detected - reuse the frame that was already captured for detection
+                bool saved = false;
+                if (motionFrame) {
+                    saved = saveOrUploadImage(motionFrame, "motion");
+                    returnFrameBuffer(motionFrame);
+                    motionFrame = NULL;
                 }
-                
+
+                // Publish to MQTT with storage info
+                if (mqttConnected) {
+                    JsonDocument doc;
+                    doc["device"] = deviceName;
+                    doc["motion"] = true;
+                    doc["timestamp"] = currentMillis / 1000;
+                    doc["count"] = motionDetectCount;
+                    doc["storage"] = sftpEnabled ? (saved ? "sftp" : "sd_fallback") : "sd";
+                    doc["saved"] = saved;
+                    doc["sftp_enabled"] = sftpEnabled;
+
+                    String output;
+                    serializeJson(doc, output);
+
+                    String topic = String(MQTT_TOPIC_BASE) + "/" + deviceName + "/motion";
+                    mqttClient.publish(topic.c_str(), output.c_str(), false);
+                    Serial.println("[Motion] Published to MQTT");
+                }
+
                 // Flash LED on motion if enabled (respects both motion flash setting and manual override)
                 if (flashMotionEnabled && !flashManualOn && FLASH_PIN >= 0) {
                     digitalWrite(FLASH_PIN, HIGH);
                     flashOffTime = currentMillis + FLASH_PULSE_MS;
                     Serial.printf("[FLASH] Motion indicator triggered for %d ms\n", FLASH_PULSE_MS);
                 }
+            } else if (motionFrame) {
+                // No motion detected - still need to return the frame buffer
+                returnFrameBuffer(motionFrame);
             }
             lastMotionCheck = currentMillis;
         }
@@ -421,10 +441,12 @@ void loop() {
     yield();
 }
 
-bool checkCameraMotion() {
+bool checkCameraMotion(camera_fb_t** outFrame) {
     // Proper motion detection: decode JPEG to RGB565, then compare pixels
     // Based on MJPEG2SD algorithm
-    
+    // outFrame: if motion detected, returns the captured frame for reuse (caller must return buffer)
+
+    if (outFrame) *outFrame = NULL;
     if (!cameraReady) return false;
 
     camera_fb_t* fb = capturePhoto();
@@ -439,16 +461,16 @@ bool checkCameraMotion() {
     const int DOWNSAMPLE_WIDTH = 96;
     const int DOWNSAMPLE_HEIGHT = 96;
     const int DOWNSAMPLE_SIZE = DOWNSAMPLE_WIDTH * DOWNSAMPLE_HEIGHT;
-    
-    // Allocate RGB565 buffer for decoded JPEG (first time only)
+
+    // Allocate RGB565 buffer for decoded JPEG (first time only) - use PSRAM
     static uint8_t* rgb565Buffer = NULL;
     if (rgb565Buffer == NULL) {
         rgb565Buffer = (uint8_t*)ps_malloc(DOWNSAMPLE_SIZE * 2); // RGB565 = 2 bytes per pixel
     }
-    
+
     if (previousFrame == NULL) {
-        // First frame - allocate grayscale buffer
-        previousFrame = (uint8_t*)malloc(DOWNSAMPLE_SIZE);
+        // First frame - allocate grayscale buffer in PSRAM (saves ~9KB heap)
+        previousFrame = (uint8_t*)ps_malloc(DOWNSAMPLE_SIZE);
         if (previousFrame && rgb565Buffer) {
             // Decode JPEG to RGB565 at downsampled resolution
             if (jpg2rgb565(fb->buf, fb->len, rgb565Buffer, JPG_SCALE_8X)) {
@@ -463,7 +485,7 @@ bool checkCameraMotion() {
                     previousFrame[i] = (r * 8 + g * 4 + b * 8) / 3;
                 }
                 previousFrameSize = DOWNSAMPLE_SIZE;
-                Serial.printf("[Motion] First frame decoded - %dx%d grayscale\n", DOWNSAMPLE_WIDTH, DOWNSAMPLE_HEIGHT);
+                Serial.printf("[Motion] First frame decoded - %dx%d grayscale (PSRAM)\n", DOWNSAMPLE_WIDTH, DOWNSAMPLE_HEIGHT);
             } else {
                 Serial.println("[Motion] JPEG decode failed");
             }
@@ -482,7 +504,7 @@ bool checkCameraMotion() {
     // Convert to grayscale and compare
     int changedPixels = 0;
     int totalPixels = DOWNSAMPLE_SIZE;
-    
+
     for (int i = 0; i < DOWNSAMPLE_SIZE; i++) {
         // Convert RGB565 pixel to grayscale
         uint16_t pixel = ((uint16_t*)rgb565Buffer)[i];
@@ -490,13 +512,13 @@ bool checkCameraMotion() {
         uint8_t g = (pixel >> 5) & 0x3F;
         uint8_t b = pixel & 0x1F;
         uint8_t currentGray = (r * 8 + g * 4 + b * 8) / 3;
-        
+
         // Compare with previous frame
         int diff = abs((int)currentGray - (int)previousFrame[i]);
         if (diff > MOTION_THRESHOLD) {
             changedPixels++;
         }
-        
+
         // Update previous frame buffer
         previousFrame[i] = currentGray;
     }
@@ -508,16 +530,24 @@ bool checkCameraMotion() {
         Serial.printf("[Motion] *** DETECTED *** %d/%d pixels changed (%.1f%%) - Count: %lu\n",
                       changedPixels, totalPixels, changePercent, motionDetectCount + 1);
         motionDetectCount++;
+
+        // Return frame to caller for reuse (avoids double capture)
+        if (outFrame) {
+            *outFrame = fb;
+            fb = NULL;  // Don't return buffer here, caller owns it now
+        }
     }
 
-    returnFrameBuffer(fb);
+    // Only return buffer if we still own it
+    if (fb) {
+        returnFrameBuffer(fb);
+    }
     return motionDetected;
 }
 
 void loadDeviceName() {
-    // LittleFS.begin(true) is idempotent - safe to call multiple times, true = format if needed
-    if (!LittleFS.begin(true)) {
-        Serial.println("[FS] Warning: LittleFS mount issue, using default device name");
+    if (!littleFsReady) {
+        Serial.println("[FS] Warning: LittleFS not ready, using default device name");
         return;
     }
 
@@ -540,9 +570,8 @@ void loadDeviceName() {
 }
 
 void saveDeviceName(const char* name) {
-    // LittleFS.begin(true) is idempotent - safe to call multiple times, true = format if needed
-    if (!LittleFS.begin(true)) {
-        Serial.println("[FS] Warning: Cannot save device name due to filesystem issue");
+    if (!littleFsReady) {
+        Serial.println("[FS] Warning: LittleFS not ready, cannot save device name");
         return;
     }
 
@@ -574,8 +603,8 @@ void getDeviceMacAddress() {
 }
 
 void loadMotionConfig() {
-    if (!LittleFS.begin(true)) {
-        Serial.println("[FS] Warning: LittleFS mount issue, using default motion config");
+    if (!littleFsReady) {
+        Serial.println("[FS] Warning: LittleFS not ready, using default motion config");
         return;
     }
 
@@ -594,8 +623,8 @@ void loadMotionConfig() {
 }
 
 void saveMotionConfig(bool enabled) {
-    if (!LittleFS.begin(true)) {
-        Serial.println("[FS] Warning: Cannot save motion config due to filesystem issue");
+    if (!littleFsReady) {
+        Serial.println("[FS] Warning: LittleFS not ready, cannot save motion config");
         return;
     }
 
@@ -610,8 +639,8 @@ void saveMotionConfig(bool enabled) {
 }
 
 void loadFlashConfig() {
-    if (!LittleFS.begin(true)) {
-        Serial.println("[FS] Warning: LittleFS mount issue, using default flash config");
+    if (!littleFsReady) {
+        Serial.println("[FS] Warning: LittleFS not ready, using default flash config");
         return;
     }
 
@@ -635,8 +664,8 @@ void loadFlashConfig() {
 }
 
 void saveFlashConfig(bool illumination, bool motion) {
-    if (!LittleFS.begin(true)) {
-        Serial.println("[FS] Warning: Cannot save flash config due to filesystem issue");
+    if (!littleFsReady) {
+        Serial.println("[FS] Warning: LittleFS not ready, cannot save flash config");
         return;
     }
 
@@ -654,8 +683,8 @@ void saveFlashConfig(bool illumination, bool motion) {
 }
 
 void loadSftpConfig() {
-    if (!LittleFS.begin(true)) {
-        Serial.println("[FS] Warning: LittleFS mount issue, using default SFTP config");
+    if (!littleFsReady) {
+        Serial.println("[FS] Warning: LittleFS not ready, using default SFTP config");
         return;
     }
 
@@ -674,8 +703,8 @@ void loadSftpConfig() {
 }
 
 void saveSftpConfig(bool enabled) {
-    if (!LittleFS.begin(true)) {
-        Serial.println("[FS] Warning: Cannot save SFTP config due to filesystem issue");
+    if (!littleFsReady) {
+        Serial.println("[FS] Warning: LittleFS not ready, cannot save SFTP config");
         return;
     }
 
@@ -1005,10 +1034,9 @@ bool saveOrUploadImage(camera_fb_t* fb, const char* reason) {
         Serial.printf("[CAPTURE] SFTP upload: %s\n", filename);
         
         if (uploadImageToSFTP(fb, filename)) {
-            // SFTP success
+            // SFTP success (count already incremented in uploadImageToSFTP)
             success = true;
             storage = "sftp";
-            sftpSuccessCount++;
         } else {
             // SFTP failed - fallback to SD card if available
             Serial.println("[SFTP] Failed - using SD fallback");
@@ -1617,6 +1645,7 @@ void setupWebServer() {
         doc["mqtt_connected"] = mqttConnected;
         doc["motion_enabled"] = motionEnabled;
         doc["flash_manual"] = flashManualOn;
+        doc["stream_clients"] = activeStreamClients;
         doc["sd_ready"] = sdReady;
         doc["sftp_enabled"] = sftpEnabled;
         doc["sftp_success_count"] = sftpSuccessCount;
@@ -2015,6 +2044,16 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
 }
 
 void handleRoot(AsyncWebServerRequest *request) {
+    // Try to serve gzipped HTML from LittleFS (6.7KB vs 27KB uncompressed)
+    if (littleFsReady && LittleFS.exists("/index.html.gz")) {
+        AsyncWebServerResponse *response = request->beginResponse(LittleFS, "/index.html.gz", "text/html");
+        response->addHeader("Content-Encoding", "gzip");
+        response->addHeader("Cache-Control", "no-cache, no-store, must-revalidate");
+        request->send(response);
+        return;
+    }
+
+    // Fallback: embedded HTML if LittleFS file missing
     String html = R"=====(<!doctype html>
 <html>
 <head>
@@ -2610,12 +2649,16 @@ public:
         _fb = NULL;
         _index = 0;
         _boundary_sent = false;
+        activeStreamClients++;
+        Serial.printf("[Stream] Client connected (active: %d)\n", activeStreamClients);
     }
 
     ~AsyncJpegStreamResponse() {
         if (_fb) {
             returnFrameBuffer(_fb);
         }
+        activeStreamClients--;
+        Serial.printf("[Stream] Client disconnected (active: %d)\n", activeStreamClients);
     }
 
     bool _sourceValid() const override { return true; }
