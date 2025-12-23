@@ -9,15 +9,17 @@ import json
 import psycopg2
 import psycopg2.extras
 import logging
+import os
+from pathlib import Path
 from datetime import datetime
 
-# Database config
+# Database config (use environment variables in production)
 DB_CONFIG = {
-    'host': '192.168.0.146',  # raspberrypi2
-    'port': 5432,
-    'database': 'camera_db',
-    'user': 'camera',
-    'password': 'change_me'
+    'host': os.getenv('CAMERA_DB_HOST', '127.0.0.1'),  # e.g., '192.168.0.146' or hostname
+    'port': int(os.getenv('CAMERA_DB_PORT', '5432')),
+    'database': os.getenv('CAMERA_DB_NAME', 'camera_db'),
+    'user': os.getenv('CAMERA_DB_USER', 'camera'),
+    'password': os.getenv('CAMERA_DB_PASSWORD')  # Required in production
 }
 
 # Build flags mapping by device type and platform
@@ -149,7 +151,10 @@ def parse_inventory_file():
     devices = []
 
     try:
-        with open('/home/aachten/PlatformIO/esp12f_ds18b20_temp_sensor/DEVICE_INVENTORY.md', 'r') as f:
+        SCRIPT_DIR = Path(__file__).resolve().parent
+        REPO_ROOT = SCRIPT_DIR.parent
+        inventory_path = REPO_ROOT / 'DEVICE_INVENTORY.md'
+        with open(inventory_path, 'r') as f:
             content = f.read()
     except FileNotFoundError:
         logging.error("DEVICE_INVENTORY.md not found")

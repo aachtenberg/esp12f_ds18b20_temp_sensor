@@ -756,9 +756,9 @@ void setup() {
   updateTopicBase();
   mqttClient.setServer(MQTT_BROKER, MQTT_PORT);
 #ifdef ESP32
-  mqttClient.setBufferSize(2048);  // Larger buffer for ESP32 with battery monitoring
+  mqttClient.setBufferSize(2048);  // Larger buffer for ESP32 (recommended when battery monitoring enabled)
 #else
-  mqttClient.setBufferSize(1024);  // Standard buffer for ESP8266
+  mqttClient.setBufferSize(512);   // Standard buffer for ESP8266 (512 bytes)
 #endif
   mqttClient.setKeepAlive(30);
   mqttClient.setSocketTimeout(5);  // Reduced from 15s to minimize blocking during connection issues

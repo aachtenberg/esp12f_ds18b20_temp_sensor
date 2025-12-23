@@ -6,7 +6,8 @@
 CURRENT_DATE=$(date +%Y%m%d)
 
 # Read current platformio.ini
-PLATFORMIO_INI="/home/aachten/PlatformIO/esp12f_ds18b20_temp_sensor/temperature-sensor/platformio.ini"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PLATFORMIO_INI="$SCRIPT_DIR/platformio.ini"
 
 # Extract current version components
 MAJOR=$(grep "FIRMWARE_VERSION_MAJOR" "$PLATFORMIO_INI" | cut -d'=' -f2 | tr -d ' ')
