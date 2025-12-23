@@ -18,11 +18,33 @@ Self-hosted IoT platform supporting temperature sensors (ESP8266/ESP32), solar m
 ./scripts/flash_device.sh surveillance
 ```
 
-### 2. Configure via WiFiManager
+### 2. Build Verification (Recommended)
+**Before flashing, verify your build configuration**:
+```bash
+# Check MQTT buffer sizes (critical!)
+grep "MQTT_MAX_PACKET_SIZE" temperature-sensor/platformio.ini
+
+# Update firmware version timestamp
+cd temperature-sensor && ./update_version.sh
+
+# Test compilation
+pio run -e esp32dev  # Use esp8266 for ESP8266 devices
+```
+
+### 3. Configure via WiFiManager
 1. Device creates AP "ESP-Setup" (password: "configure")
 2. Connect and open the WiFiManager captive portal (e.g., http://esp-setup.local)
 3. Enter WiFi credentials and device name
 4. Device connects and starts sending data
+
+### 4. Verify Deployment
+```bash
+# Monitor MQTT for device status
+mosquitto_sub -h your.mqtt.broker.com -t "esp-sensor-hub/+/status" -v
+
+# Check device health
+curl http://device-ip/health | jq '.sensor_healthy, .mqtt_publish_failures'
+```
 
 ### 3. Monitor Data
 - **Grafana Dashboards**: http://your-pi:3000
@@ -162,6 +184,31 @@ sudo docker ps
 sudo docker logs influxdb
 sudo docker logs grafana
 ```
+
+## Troubleshooting
+
+### Device Not Publishing Data
+1. **Check WiFi connection**: Device status should show `wifi_connected: true`
+2. **Verify MQTT broker**: `mosquitto_sub -h broker -t "esp-sensor-hub/#" -v`
+3. **Monitor device logs**: Look for MQTT connection status in serial output
+4. **Check sensor health**: Temperature sensors should show `sensor_healthy: true`
+
+### Temperature Sensor Issues
+- **Hardware problem**: DS18B20 disconnected/faulty → `sensor_healthy: false`
+- **Web endpoint works but MQTT fails**: Check CONFIG.md for detailed troubleshooting
+- **Sensor read failures increasing**: Verify GPIO 4 connection and 4.7kΩ pull-up resistor
+
+### OTA Upload Problems
+- **WSL2/Windows firewall**: Temporarily disable Windows Firewall Private profile
+- **Device not responding**: Verify device IP and that it's online
+- **Authentication failed**: Check OTA_PASSWORD in secrets.h matches upload_flags
+
+### Build Issues
+- **MQTT buffer size**: ESP32 requires `-D MQTT_MAX_PACKET_SIZE=2048`
+- **Missing secrets.h**: Copy from secrets.h.example
+- **Wrong environment**: Use `esp32dev` for ESP32, `esp8266` for ESP8266
+
+**📖 For detailed troubleshooting steps, see [CONFIG.md](CONFIG.md)**
 
 ## Benefits
 

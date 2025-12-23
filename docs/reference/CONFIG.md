@@ -146,6 +146,31 @@ from(bucket: "sensor_data")
 3. Monitor device serial for publish status: `[MQTT] Publishing to ... Publish successful`
 4. Check heap memory isn't exhausted (`free_heap` in status message)
 
+### Temperature Sensor Hardware Issues
+**Symptom**: Device shows `sensor_healthy: false` and `sensor_read_failures > 0` in MQTT status
+
+**Root Cause**: DS18B20 temperature sensor disconnected, faulty, or wiring issue
+
+**Symptoms**:
+- Device online and MQTT working (status messages appear)
+- Temperature readings show "--" or invalid values
+- Web endpoints return valid readings but MQTT temperature messages missing
+- `sensor_read_failures` counter increasing in status payloads
+
+**Troubleshooting Steps**:
+1. **Check sensor connection**: Verify DS18B20 connected to GPIO 4 with 4.7kΩ pull-up resistor
+2. **Test web endpoint**: `curl http://device-ip/temperaturec` - if returns valid temp, sensor works but MQTT failing
+3. **Monitor MQTT specifically**: `mosquitto_sub -h broker -t "esp-sensor-hub/+/temperature" -v`
+4. **Check device logs**: Look for `[MQTT] Publishing temperature...` vs actual publishes
+
+**Hardware Verification**:
+- **Power**: 3.3V to sensor VCC, GND to GND
+- **Data**: GPIO 4 with 4.7kΩ pull-up to 3.3V
+- **Multiple sensors**: Code supports multiple DS18B20 on same bus
+- **Parasitic power**: Sensor can operate without separate power pin
+
+**Recovery**: Replace DS18B20 sensor or fix wiring - device firmware is correct
+
 ### MQTT Buffer Size Issues
 **Symptom**: Device reports successful MQTT publishes but messages don't appear in broker
 
@@ -203,6 +228,65 @@ upload_port = DEVICE_IP
 upload_flags = --auth=YOUR_OTA_PASSWORD --port=3232
 ```
 
+### Device-Specific Build Environments
+**Choose correct environment based on hardware**:
+
+#### ESP32 with Display (esp32dev)
+```bash
+pio run -e esp32dev -t upload  # Full-featured with OLED display
+```
+
+#### ESP32 API-Only (esp32dev-serial)  
+```bash
+pio run -e esp32dev-serial -t upload  # Serial upload, API-only mode
+```
+
+#### ESP8266 API-Only (esp8266)
+```bash
+pio run -e esp8266 -t upload  # USB-powered, no display, API endpoints only
+```
+
+**Environment Differences**:
+- **esp32dev**: OLED display, full web interface, battery monitoring
+- **esp32dev-serial**: Same as esp32dev but serial upload only  
+- **esp8266**: API-only, no HTML interface, optimized for USB power
+
+### OTA Update Procedures
+**For devices with known IP addresses**:
+
+1. **Update platformio.ini upload_port**:
+   ```ini
+   upload_port = 192.168.0.196  # Target device IP
+   ```
+
+2. **Verify device is ready**:
+   ```bash
+   ping 192.168.0.196
+   curl http://192.168.0.196/health | jq '.uptime_seconds'
+   ```
+
+3. **Handle WSL2 firewall** (if applicable):
+   ```powershell
+   # Temporarily disable Windows Firewall
+   Set-NetFirewallProfile -Profile Private -Enabled False
+   ```
+
+4. **Upload firmware**:
+   ```bash
+   pio run -e esp32dev -t upload
+   ```
+
+5. **Verify update**:
+   ```bash
+   curl http://192.168.0.196/health | jq '.firmware_version'
+   mosquitto_sub -h broker -t "esp-sensor-hub/+/events" -v -C 5
+   ```
+
+6. **Re-enable firewall** (if disabled):
+   ```powershell
+   Set-NetFirewallProfile -Profile Private -Enabled True
+   ```
+
 ### Firmware Version Tracking
 
 **All devices include automatic firmware version tracking** for deployment management and OTA verification.
@@ -251,6 +335,58 @@ For major/minor/patch changes, edit `platformio.ini`:
 2. Copy from `temperature-sensor/include/secrets.h.example` if needed
 3. Verify MQTT_BROKER, MQTT_PORT, MQTT_USER, MQTT_PASSWORD are defined
 4. Check PlatformIO environment matches board type (esp8266 vs esp32dev)
+
+### Build Verification Steps
+**Before deploying firmware, verify build configuration**:
+
+1. **Check MQTT buffer sizes** (critical for ESP32):
+   ```bash
+   grep "MQTT_MAX_PACKET_SIZE" temperature-sensor/platformio.ini
+   # Should show: -D MQTT_MAX_PACKET_SIZE=2048 for ESP32, =512 for ESP8266
+   ```
+
+2. **Verify firmware version**:
+   ```bash
+   cd temperature-sensor && ./update_version.sh  # Updates build timestamp
+   grep "BUILD_TIMESTAMP" platformio.ini
+   ```
+
+3. **Check upload configuration**:
+   ```bash
+   grep "upload_port" temperature-sensor/platformio.ini
+   # Should match target device IP for OTA uploads
+   ```
+
+4. **Test compilation**:
+   ```bash
+   pio run -e esp32dev  # Or esp8266
+   # Should complete without errors
+   ```
+
+### Device Identification and IP Tracking
+**Track device IPs and chip IDs for troubleshooting**:
+
+1. **Monitor MQTT for device discovery**:
+   ```bash
+   mosquitto_sub -h your.mqtt.broker.com -t "esp-sensor-hub/+/status" -v -C 10
+   # Shows all active devices with chip_id and device names
+   ```
+
+2. **Check device health endpoints**:
+   ```bash
+   curl http://device-ip/health | jq '.device, .chip_id, .firmware_version'
+   ```
+
+3. **Update DEVICE_INVENTORY.md** after deployments:
+   - Record IP addresses for OTA access
+   - Track chip IDs for device identification
+   - Note firmware versions and update dates
+
+4. **Network scanning** for unknown devices:
+   ```bash
+   nmap -sn 192.168.0.0/24 | grep "ESP"
+   # Find devices on network
+   ```
 
 ## ESP8266 API-Only Configuration
 
