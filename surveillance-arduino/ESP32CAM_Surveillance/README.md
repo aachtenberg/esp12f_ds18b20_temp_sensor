@@ -98,7 +98,13 @@ Open **Tools → Manage Libraries** and install:
 6. Press **Reset** again to start normally
 
 #### Subsequent Uploads (OTA):
-OTA is currently disabled in this version. Use FTDI for all uploads.
+OTA is supported and can be enabled by setting a secure `OTA_PASSWORD` in `secrets.h`.
+
+- Edit `secrets.h` and set `#define OTA_PASSWORD "YOUR_OTA_PASSWORD"` (replace with a strong password).
+- The firmware will enable OTA at runtime only when `OTA_PASSWORD` is set to a non-default/secure value.
+- When enabled, use `espota.py` or Arduino IDE network upload to perform OTA uploads (ensure your host can reach the device on port 3232 and firewall rules allow it).
+
+> Note: For first-time uploads or recovery, continue to use the FTDI programmer as described above.
 
 ## First-Time Configuration
 
