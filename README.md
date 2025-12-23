@@ -56,7 +56,14 @@ Multi-device IoT monitoring platform for ESP32/ESP8266/ESP32-S3 with MQTT data p
 
 ### Update Status
 - ✅ **Pump House**: Updated Dec 22, 2025 - MQTT buffer size fix applied
+- ✅ **Spa**: Updated Dec 22, 2025 - OTA firmware rebuild completed
 - 🔍 **Others**: Monitoring for MQTT publishing issues, updates available via OTA/serial
+
+**Recent Findings (Dec 22, 2025)**:
+- Temperature sensor MQTT issues typically caused by DS18B20 hardware failures, not firmware
+- All devices require MQTT_MAX_PACKET_SIZE=2048 for ESP32 (512 for ESP8266) 
+- WSL2 OTA uploads require Windows Firewall workaround
+- Device health monitoring available via `/health` endpoint
 
 ---
 
@@ -100,12 +107,24 @@ cp temperature-sensor/include/secrets.h.example temperature-sensor/include/secre
 
 ### 2. Flash Device
 
+**⚠️ Important**: Before flashing, verify build configuration and update firmware version:
+```bash
+# Check MQTT buffer sizes (critical for ESP32!)
+grep "MQTT_MAX_PACKET_SIZE" temperature-sensor/platformio.ini
+
+# Update firmware version timestamp  
+cd temperature-sensor && ./update_version.sh
+
+# Test compilation
+pio run -e esp32dev  # Use correct environment for your board
+```
+
 **Initial USB Flash (required once):**
 ```bash
 # Temperature sensor (ESP8266/ESP32)
 cd temperature-sensor && pio run -e esp8266 -t upload --upload-port /dev/ttyUSB0
 
-# Or ESP32:
+# Or ESP32 with display:
 pio run -e esp32dev -t upload --upload-port /dev/ttyUSB0
 ```
 
@@ -115,7 +134,10 @@ pio run -e esp32dev -t upload --upload-port /dev/ttyUSB0
 pio run -e esp32dev -t upload --upload-port 192.168.0.XXX
 
 # OTA password required (set in secrets.h: OTA_PASSWORD)
+# Note: WSL2 users may need to temporarily disable Windows Firewall
 ```
+
+**📖 For detailed build procedures and troubleshooting, see [docs/reference/CONFIG.md](docs/reference/CONFIG.md)**
 
 ### 3. Configure via WiFiManager Portal
 1. Device creates AP "ESP-Setup" (no password)

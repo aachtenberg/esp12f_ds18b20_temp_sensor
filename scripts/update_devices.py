@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+2#!/usr/bin/env python3
 """
 Simple Device Database Updater
 Updates PostgreSQL database on raspberrypi2 with device information from DEVICE_INVENTORY.md
