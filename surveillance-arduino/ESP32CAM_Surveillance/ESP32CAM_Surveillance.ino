@@ -120,6 +120,8 @@ unsigned long lastMotionCheck = 0;
 // Device state
 bool cameraReady = false;
 bool mqttConnected = false;
+// OTA runtime state (enabled when OTA_PASSWORD is configured securely)
+bool otaEnabled = false;
 
 // Metrics
 unsigned long captureCount = 0;
@@ -282,8 +284,20 @@ void setup() {
     // Setup MQTT
     setupMQTT();
 
-    // Setup OTA updates (disabled)
-    // setupOTA();
+    // Setup OTA updates (enabled when a secure OTA_PASSWORD is set)
+    #if defined(OTA_PASSWORD)
+      if (WiFi.status() == WL_CONNECTED) {
+        String otaPwd = String(OTA_PASSWORD);
+        if (otaPwd != "your_ota_password" && otaPwd != "YOUR_OTA_PASSWORD" && otaPwd.length() > 0) {
+          setupOTA();
+          otaEnabled = true;
+        } else {
+          Serial.println("[OTA] OTA_PASSWORD is not configured securely; skipping OTA setup");
+        }
+      }
+    #else
+      Serial.println("[OTA] OTA not compiled in (OTA_PASSWORD undefined)");
+    #endif
 
     // Setup Web Server
     setupWebServer();
@@ -306,8 +320,10 @@ void setup() {
 void loop() {
     unsigned long currentMillis = millis();
 
-    // Handle OTA updates (disabled)
-    // ArduinoOTA.handle();
+    // Handle OTA updates (if enabled)
+    if (otaEnabled) {
+      ArduinoOTA.handle();
+    }
 
     // Check for WiFi fallback AP mode
     checkWiFiFallback();
