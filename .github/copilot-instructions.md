@@ -125,12 +125,15 @@
 
 ### CONFIG.md Content:
 ```
+✅ Common configuration across all projects
 ✅ secrets.h setup examples
-✅ Detailed deployment commands
-✅ Data query examples
-✅ Specific troubleshooting procedures
-✅ Configuration file formats
-✅ API reference examples
+✅ WiFi/MQTT broker setup
+✅ Deployment commands (USB flash, OTA)
+✅ Common troubleshooting procedures
+✅ Links to project-specific configs:
+   - docs/temperature-sensor/CONFIG.md
+   - docs/surveillance/CONFIG.md
+   - docs/solar-monitor/CONFIG.md
 ```
 
 ### README.md Content:
@@ -635,7 +638,7 @@ mosquitto_pub -h BROKER -t "esp-sensor-hub/DEVICE/command" -m "status"
 - **Configuration**: `temperature-sensor/platformio.ini`
   - ESP8266: `-D DISABLE_DEEP_SLEEP=1`
   - ESP32: No flag (deep sleep available)
-- **Documentation**: `docs/reference/CONFIG.md`
+- **Documentation**: `docs/temperature-sensor/CONFIG.md`
   - Complete deep sleep section with all commands
   - Troubleshooting procedures
   - Power consumption details
