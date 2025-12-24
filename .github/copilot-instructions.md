@@ -440,17 +440,37 @@ All MQTT messages include `firmware_version` field:
 
 ### Version Update Process
 
-#### Automatic Build Timestamp
+#### Automatic Version Bumping Script
+**Always use `update_version.sh` before building to ensure consistent versioning across all environments.**
+
+The script automatically updates version across ALL platformio.ini environments:
+
 ```bash
 cd temperature-sensor
-./update_version.sh  # Updates BUILD_TIMESTAMP to current date
+
+# Bump patch version (bug fixes) - 1.0.5 → 1.0.6
+./update_version.sh --patch
+
+# Bump minor version (features) - 1.0.5 → 1.1.0
+./update_version.sh --minor
+
+# Bump major version (breaking changes) - 1.0.5 → 2.0.0
+./update_version.sh --major
+
+# Or just update timestamp to current date (keep same version)
+./update_version.sh
 ```
 
-#### Manual Version Bumps
-For major/minor/patch changes, update platformio.ini:
-```ini
--D FIRMWARE_VERSION_PATCH=3  # Increment for bug fixes
-```
+**Build Process:**
+1. Run `./update_version.sh --patch` (or appropriate bump level)
+2. Run `pio run -e esp32dev -t upload --upload-port 192.168.x.x`
+3. Verify device reports new version in MQTT status
+
+**What the script does:**
+- Updates `FIRMWARE_VERSION_MAJOR`, `FIRMWARE_VERSION_MINOR`, `FIRMWARE_VERSION_PATCH` in all environments
+- Updates `BUILD_TIMESTAMP` to current date (YYYYMMDD format)
+- Maintains consistency across esp32dev, esp32dev-serial, esp8266, esp32s3, etc.
+- Produces version string: `MAJOR.MINOR.PATCH-buildYYYYMMDD`
 
 ### OTA Version Tracking
 
