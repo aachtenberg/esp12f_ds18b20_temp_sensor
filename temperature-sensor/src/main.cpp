@@ -1145,6 +1145,9 @@ void setup() {
         break;
       }
       mqttClient.loop();  // Process incoming MQTT messages
+      if (deepSleepSeconds == 0) {
+        ArduinoOTA.handle();
+      }
       delay(10);
     }
 
