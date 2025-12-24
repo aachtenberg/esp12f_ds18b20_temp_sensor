@@ -75,6 +75,7 @@ DeviceMetrics metrics;
 
 // Deep sleep configuration
 int deepSleepSeconds = 0;  // Default disabled
+volatile bool otaInProgress = false;  // Tracks active OTA upload to prevent sleep during transfer
 const char* DEEP_SLEEP_FILE = "/deep_sleep_seconds.txt";
 
 // Track if we just woke from deep sleep to prevent immediate re-sleep
@@ -390,6 +391,29 @@ const char* getMqttStateString(int state) {
   }
 }
 
+// Gracefully disconnect from MQTT broker with proper cleanup
+void gracefulMqttDisconnect() {
+  if (!mqttClient.connected()) {
+    return;  // Already disconnected
+  }
+  
+  Serial.println("[MQTT] Initiating graceful disconnect...");
+  mqttClient.disconnect();
+  
+  // Wait up to 500ms for graceful disconnect to complete
+  // PubSubClient needs time to properly close the TCP connection
+  unsigned long disconnectStart = millis();
+  while (mqttClient.connected() && (millis() - disconnectStart) < 500) {
+    delay(10);
+  }
+  
+  if (mqttClient.connected()) {
+    Serial.println("[MQTT] Timeout waiting for graceful disconnect");
+  } else {
+    Serial.println("[MQTT] Gracefully disconnected from broker");
+  }
+}
+
 bool ensureMqttConnected() {
   unsigned long now = millis();
 
@@ -409,7 +433,7 @@ bool ensureMqttConnected() {
       Serial.println("[MQTT] Stale connection detected - forcing reconnect");
       Serial.printf("[MQTT] Last successful publish was %lu seconds ago\n",
                     (now - metrics.lastSuccessfulMqttPublish) / 1000);
-      mqttClient.disconnect();
+      gracefulMqttDisconnect();
       delay(100);
       // Fall through to reconnection logic below
     } else {
@@ -536,6 +560,8 @@ void publishStatus() {
   doc["sensor_healthy"] = isValidTemperature(temperatureC);
   doc["wifi_reconnects"] = metrics.wifiReconnects;
   doc["sensor_read_failures"] = metrics.sensorReadFailures;
+  doc["deep_sleep_enabled"] = (deepSleepSeconds > 0);
+  doc["deep_sleep_seconds"] = deepSleepSeconds;
   #ifdef BATTERY_MONITOR_ENABLED
     if (metrics.batteryPercent >= 0) {
       doc["battery_voltage"] = metrics.batteryVoltage;
@@ -573,13 +599,11 @@ void enterDeepSleepIfEnabled() {
     #ifdef ESP32
       Serial.println("[DEEP SLEEP] ESP32 RTC timer configured - no hardware mods needed");
 
-      // Disconnect MQTT and WiFi before deep sleep
+      // Gracefully disconnect MQTT and WiFi before deep sleep
       Serial.println("[DEEP SLEEP] Disconnecting MQTT and WiFi...");
-      if (mqttClient.connected()) {
-        mqttClient.disconnect();
-      }
+      gracefulMqttDisconnect();
       WiFi.disconnect(true);  // true = turn off WiFi radio
-      delay(100);  // Give time for disconnect to complete
+      delay(100);  // Give time for WiFi to power down
     #endif
 
     // Flush serial before sleeping
@@ -720,6 +744,12 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
     if (strncmp(payloadStr, "deepsleep ", 10) == 0) {
       int newSeconds = atoi(payloadStr + 10); // Parse number after "deepsleep "
       if (newSeconds >= 0 && newSeconds <= 3600) { // Max 1 hour
+        // Warn if OTA is active
+        if (otaInProgress) {
+          Serial.println("[WARNING] OTA upload in progress - ignoring deep sleep change");
+          publishEvent("ota_warning", "Ignored deep sleep change during active OTA upload", "warning");
+          return;
+        }
         deepSleepSeconds = newSeconds;
         saveDeepSleepConfig();
 
@@ -758,14 +788,15 @@ void setupWebServer() {
 void setupWiFi() {
   // Double Reset Detector already initialized globally (no memory leak)
 
-  // Enable WiFi power save mode (modem sleep) for low power operation
+  // Disable WiFi power save on all devices for reliable OTA/MQTT
+  // Deep sleep (when enabled) handles power saving for battery devices
   #ifdef ESP32
-    WiFi.setSleep(true);
-    esp_wifi_set_ps(WIFI_PS_MIN_MODEM);
+    WiFi.setSleep(false);
+    esp_wifi_set_ps(WIFI_PS_NONE);
   #else
-    WiFi.setSleepMode(WIFI_LIGHT_SLEEP);
+    WiFi.setSleepMode(WIFI_MODEM_SLEEP);  // Disable power save on ESP8266
   #endif
-  Serial.println("[POWER] WiFi modem sleep enabled");
+  Serial.println("[POWER] WiFi power save disabled (full radio power for OTA/MQTT reliability)");
 
   WiFi.mode(WIFI_STA);
   // Enable auto-reconnect and persist credentials (low-power friendly)
@@ -1074,9 +1105,15 @@ void setup() {
   // Connect to WiFi
   setupWiFi();
 
-  // If deep sleep is enabled, skip OTA/web server setup and publish immediately
+  // Setup OTA updates (after WiFi is connected) - always available regardless of deep sleep config
+  // OTA will only listen when deepSleepSeconds == 0 (see loop())
+  if (WiFi.status() == WL_CONNECTED) {
+    setupOTA();
+  }
+
+  // If deep sleep is enabled, publish immediately and wait for MQTT commands
   if (deepSleepSeconds > 0) {
-    Serial.println("[DEEP SLEEP] Deep sleep mode enabled - skipping OTA and web server");
+    Serial.println("[DEEP SLEEP] Deep sleep mode enabled - publishing and waiting for commands");
 
     // Ensure MQTT is connected before publishing
     if (!ensureMqttConnected()) {
@@ -1098,7 +1135,7 @@ void setup() {
     Serial.println("========================================");
     Serial.println();
 
-    // Wait briefly to process any incoming MQTT commands (e.g., to disable deep sleep)
+    // Wait briefly to process any incoming MQTT commands (e.g., to disable deep sleep or OTA)
     Serial.println("[DEEP SLEEP] Waiting 5 seconds for MQTT commands...");
     unsigned long commandWaitStart = millis();
     while (millis() - commandWaitStart < 5000) {
@@ -1115,12 +1152,6 @@ void setup() {
     // If we reach here, publish failed and we'll retry in loop()
     lastPublishTime = millis();
     return;
-  }
-
-  // Normal operation mode (deep sleep disabled)
-  // Setup OTA updates (after WiFi is connected)
-  if (WiFi.status() == WL_CONNECTED) {
-    setupOTA();
   }
 
   // Setup web server (only if enabled)
@@ -1236,7 +1267,7 @@ void loop() {
         // Force MQTT reconnection on critically low memory
         if (freeHeap < 6000) {
           Serial.println("[WARNING] Critical heap - reconnecting MQTT");
-          mqttClient.disconnect();
+          gracefulMqttDisconnect();
           lastMqttReconnectAttempt = 0;  // Force immediate reconnect
         }
       }
@@ -1247,8 +1278,10 @@ void loop() {
     if (rssi < WIFI_MIN_RSSI) {
       Serial.printf("[WARNING] Signal too weak (%d dBm), deferring MQTT publish\n", rssi);
       lastPublishTime = now;  // Reset timer to retry later
-      // Still call OTA.handle() before returning
-      ArduinoOTA.handle();
+      // Still call OTA.handle() if deep sleep disabled
+      if (deepSleepSeconds == 0) {
+        ArduinoOTA.handle();
+      }
       return;  // Skip this cycle
     }
     
@@ -1304,8 +1337,11 @@ void loop() {
     lastDisplayUpdate = millis();
   }
   
-  // Handle OTA updates (called frequently for responsive OTA)
-  ArduinoOTA.handle();
+  // Handle OTA updates (only when deep sleep is disabled)
+  // When deep sleep is enabled, device sleeps and OTA is unavailable
+  if (deepSleepSeconds == 0) {
+    ArduinoOTA.handle();
+  }
   
   yield(); // Feed watchdog at end of loop
 }
