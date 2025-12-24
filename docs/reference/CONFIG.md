@@ -43,6 +43,38 @@ static const char* OTA_PASSWORD = "your-ota-password";
 #endif
 ```
 
+### Device Configuration (.env)
+
+**Device-specific settings** (IP addresses, OTA credentials) are managed in `.env` file (gitignored):
+
+```bash
+# Copy template to create your .env
+cp .env.example .env
+
+# Edit with your device information
+nano .env
+```
+
+**Required values**:
+- `OTA_PASSWORD` - Used for over-the-air updates
+- Device IP addresses - `ESP32DEV_IP`, `ESP8266_IP`, etc.
+- `MQTT_BROKER_IP` - Your MQTT broker IP
+- Optional: WiFi credentials if not using portal
+
+**Loading configuration**:
+```bash
+# Source configuration before deployment
+source scripts/load-device-config.sh
+
+# Verifies all required values are set and exports as environment variables
+```
+
+⚠️ **Security**: `.env` file contains sensitive data:
+- Never commit to git (in `.gitignore`)
+- Never share publicly
+- Back up securely for restore
+- Use `.env.example` as public template
+
 ### WiFi Configuration via WiFiManager
 
 **All projects use WiFiManager for zero-hardcoded credentials**:
