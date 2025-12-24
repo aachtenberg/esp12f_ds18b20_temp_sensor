@@ -2,6 +2,67 @@
 
 Helper scripts for building and flashing ESP devices.
 
+## MQTT Device Control
+
+### Unified Device Control Script
+
+**`mqtt_device_control.sh`** - Comprehensive MQTT command interface for all ESP32 devices:
+
+```bash
+cd /home/aachten/PlatformIO/esp12f_ds18b20_temp_sensor/scripts
+
+# Enable deep sleep (30 second interval)
+./mqtt_device_control.sh deepsleep 30
+
+# Disable deep sleep (continuous operation)
+./mqtt_device_control.sh disable-sleep
+
+# Enable deep sleep (shortcut)
+./mqtt_device_control.sh enable-sleep 30
+
+# Request device status
+./mqtt_device_control.sh status
+
+# Restart device
+./mqtt_device_control.sh restart
+
+# Monitor all device topics (temperature, status, events)
+./mqtt_device_control.sh monitor
+
+# Control different device
+./mqtt_device_control.sh -d Greenhouse status
+
+# Use different MQTT broker
+./mqtt_device_control.sh -b 192.168.1.100 deepsleep 30
+```
+
+**Features:**
+- Automatic retry with configurable intervals (catches device wake windows)
+- Visual confirmation of command success
+- Colored output for easy reading
+- Support for all MQTT commands
+- Environment variable configuration (`MQTT_BROKER`, `DEVICE_NAME`)
+- Multi-topic monitoring
+
+**Available Commands:**
+- `deepsleep <seconds>` - Configure deep sleep (0-3600 seconds, 0=disable)
+- `disable-sleep` - Disable deep sleep (shortcut)
+- `enable-sleep <seconds>` - Enable deep sleep (shortcut)
+- `status` - Request device status update
+- `restart` - Restart the device
+- `monitor` - Monitor all device topics in real-time
+
+**Options:**
+- `-b, --broker <ip>` - MQTT broker IP
+- `-d, --device <name>` - Device name
+- `-r, --retry <count>` - Maximum retry attempts (default: 15)
+- `-i, --interval <sec>` - Retry interval (default: 2)
+
+### Legacy Scripts
+
+**`disable_sleep_mqtt.sh`** - Original deep sleep disable script (still functional)
+**`monitor_sleep_cycle.sh`** - Monitor device wake/sleep cycles via HTTP health endpoint
+
 ## Device Inventory Database Update
 
 ### Update PostgreSQL Database
