@@ -1099,9 +1099,9 @@ void setup() {
     Serial.println();
 
     // Wait briefly to process any incoming MQTT commands (e.g., to disable deep sleep)
-    Serial.println("[DEEP SLEEP] Waiting 2 seconds for MQTT commands...");
+    Serial.println("[DEEP SLEEP] Waiting 5 seconds for MQTT commands...");
     unsigned long commandWaitStart = millis();
-    while (millis() - commandWaitStart < 2000) {
+    while (millis() - commandWaitStart < 5000) {
       mqttClient.loop();  // Process incoming MQTT messages
       delay(10);
     }

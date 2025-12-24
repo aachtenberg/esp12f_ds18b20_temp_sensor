@@ -204,15 +204,15 @@ When deep sleep is enabled (non-zero value):
 1. Device wakes from deep sleep
 2. Connects to WiFi and MQTT
 3. Publishes temperature and status
-4. **Waits 2 seconds** to process incoming MQTT commands
+4. **Waits 5 seconds** to process incoming MQTT commands
 5. Enters deep sleep for configured duration
 6. **No web server** - HTTP endpoints not available during deep sleep cycles
 7. **MQTT commands only** - use MQTT to change configuration remotely
 
 **Power Consumption**:
-- Active (WiFi/MQTT): ~80mA for 4-6 seconds
+- Active (WiFi/MQTT): ~80mA for 8-9 seconds (including 5s command window)
 - Deep sleep: ~10µA
-- With 30-second cycle: Average ~3mA (excellent for battery operation)
+- With 30-second cycle: Average ~4mA (excellent for battery operation)
 
 #### Remote Management via MQTT
 
