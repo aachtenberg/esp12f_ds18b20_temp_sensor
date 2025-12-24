@@ -739,8 +739,8 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
 
   Serial.printf("[MQTT] Received command: %s = %s\n", topic, payloadStr);
 
-  // Handle deep sleep configuration commands
-  if (strstr(topic, "/command") != NULL) {
+  // Handle deep sleep configuration commands (exact topic match to avoid false positives)
+  if (strcmp(topic, getTopicCommand()) == 0) {
     if (strncmp(payloadStr, "deepsleep ", 10) == 0) {
       int newSeconds = atoi(payloadStr + 10); // Parse number after "deepsleep "
       if (newSeconds >= 0 && newSeconds <= 3600) { // Max 1 hour
@@ -794,7 +794,7 @@ void setupWiFi() {
     WiFi.setSleep(false);
     esp_wifi_set_ps(WIFI_PS_NONE);
   #else
-    WiFi.setSleepMode(WIFI_MODEM_SLEEP);  // Disable power save on ESP8266
+    WiFi.setSleepMode(WIFI_NONE_SLEEP);  // Disable power save on ESP8266
   #endif
   Serial.println("[POWER] WiFi power save disabled (full radio power for OTA/MQTT reliability)");
 
@@ -1139,6 +1139,11 @@ void setup() {
     Serial.println("[DEEP SLEEP] Waiting 5 seconds for MQTT commands...");
     unsigned long commandWaitStart = millis();
     while (millis() - commandWaitStart < 5000) {
+      // Check if MQTT connection is still active before processing
+      if (!mqttClient.connected()) {
+        Serial.println("[DEEP SLEEP] MQTT disconnected during command wait window");
+        break;
+      }
       mqttClient.loop();  // Process incoming MQTT messages
       delay(10);
     }

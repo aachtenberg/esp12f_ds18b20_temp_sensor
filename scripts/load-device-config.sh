@@ -2,11 +2,16 @@
 # Source device configuration from .env file
 # This script loads IP addresses and credentials for device management
 
+# Determine .env file location (allow override via ENV_FILE, default to project root)
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+project_root="$(cd "${script_dir}/.." && pwd)"
+ENV_FILE="${ENV_FILE:-${project_root}/.env}"
+
 set -a  # Export all variables
-if [ -f /home/aachten/PlatformIO/esp12f_ds18b20_temp_sensor/.env ]; then
-    source /home/aachten/PlatformIO/esp12f_ds18b20_temp_sensor/.env
+if [ -f "$ENV_FILE" ]; then
+    source "$ENV_FILE"
 else
-    echo "ERROR: .env file not found!"
+    echo "ERROR: .env file not found at $ENV_FILE"
     echo "Please copy .env.example to .env and fill in your values:"
     echo "  cp .env.example .env"
     exit 1
