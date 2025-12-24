@@ -550,9 +550,9 @@ void setup() {
     publishStatus();
 
     // CRITICAL: Wait for MQTT commands before sleeping
-    Serial.println("[DEEP SLEEP] Waiting 2 seconds for MQTT commands...");
+    Serial.println("[DEEP SLEEP] Waiting 5 seconds for MQTT commands...");
     unsigned long commandWaitStart = millis();
-    while (millis() - commandWaitStart < 2000) {
+    while (millis() - commandWaitStart < 5000) {
       mqttClient.loop();  // Process incoming MQTT messages
       delay(10);
     }
@@ -569,13 +569,13 @@ void setup() {
 1. Device wakes from RTC timer
 2. Connects to WiFi and MQTT (2-3 seconds)
 3. Publishes temperature and status
-4. **Waits 2 seconds** processing MQTT commands
+4. **Waits 5 seconds** processing MQTT commands
 5. Disconnects WiFi/MQTT cleanly
 6. Enters deep sleep
 7. **No web server** or OTA during sleep cycles
 
 **Power Profile**:
-- Active: ~80mA for 4-6 seconds
+- Active: ~80mA for 8-9 seconds (including 5s command window)
 - Sleep: ~10µA
 - Average (30s cycle): ~3mA
 
@@ -613,8 +613,8 @@ mosquitto_pub -h BROKER -t "esp-sensor-hub/DEVICE/command" -m "status"
 **Cannot configure device remotely**:
 - Missing `mqttClient.loop()` processing window after wake
 - Commands sent but device sleeps before processing
-- Check serial for: `[DEEP SLEEP] Waiting 2 seconds for MQTT commands...`
-- Solution: Add 2-second loop delay before entering sleep
+- Check serial for: `[DEEP SLEEP] Waiting 5 seconds for MQTT commands...`
+- Solution: Add 5-second loop delay before entering sleep
 
 **Configuration not persisting**:
 - Deep sleep config saves to SPIFFS/LittleFS
