@@ -33,6 +33,10 @@ Thumbs.db
 compile_commands.json
 .clang_format
 .clang-format copy
+*.bin
 
 # PCB design files
 docs/pcb_design/
+scripts/disable_sleep_and_upload.sh
+scripts/disable_sleep_mqtt.sh
+scripts/monitor_sleep_cycle.sh

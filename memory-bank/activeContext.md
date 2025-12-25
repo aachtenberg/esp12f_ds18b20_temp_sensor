@@ -3,139 +3,123 @@
 *Last updated: December 2025*
 
 ## Current Branch
-**`main`** - Firmware versioning system implemented and documented
+**`feature/battery-deep-sleep-optimizations`** - OTA gating & graceful MQTT disconnect (PR #10)
 
 ## Recent Milestone Completed
-✅ **Comprehensive Firmware Versioning System** - Automatic version tracking with build timestamps and MQTT integration
+✅ **ESP32-S3 Triple-Reset Detection Fixed** using NVS (Non-Volatile Storage)
 
 ## Current Goals
 
 ### Immediate
-1. **Monitor OTA deployments** - Verify firmware versioning in production MQTT messages
-2. **Version management** - Use update_version.sh script for each deployment
-3. **Documentation review** - Ensure all team members understand versioning procedures
+1. **Review branch for merge** - All work completed and tested on hardware
+2. **Tag release** - Version with ESP32-S3 support and NVS-based reset detection
+3. **Monitor field deployments** - Verify NVS reliability in production
 
 ### Active Work Context
-- **Platform**: All ESP32 variants (ESP32, ESP32-S3, ESP8266)
-- **Version Format**: MAJOR.MINOR.PATCH-buildYYYYMMDD
-- **Status**: Fully implemented, tested, documented
-- **Integration**: MQTT messages include firmware_version field
-- **Automation**: Build script updates timestamps automatically
+- **Platform**: ESP32-S3 (Freenove ESP32-S3 WROOM)
+- **Flash Usage**: 1,176,949 bytes (37.4% of 3.1MB)
+- **Status**: Fully functional, tested, documented
+- **Network**: Both config portal (192.168.4.1) and station mode working
+- **Camera**: OV2640 initializing successfully with PSRAM
+- **MQTT**: Connected and publishing trace data
 
 ## Technical Implementation Summary
 
 ### What Changed
-1. **Version Header**: New `version.h` with `getFirmwareVersion()` function
-   - Format: MAJOR.MINOR.PATCH-buildYYYYMMDD
-   - Build flags: FIRMWARE_VERSION_MAJOR/MINOR/PATCH, BUILD_TIMESTAMP
+1. **Reset Detection Storage**: RTC memory → NVS (Preferences library)
+   - Keys: `crash_flag`, `crash_cnt`, `reset_cnt`, `window`
+   - Namespace: "reset"
+   - Survives all reset types including hardware resets
 
-2. **Build System**: PlatformIO configuration with version build flags
-   - Automatic timestamp updates via `update_version.sh`
-   - Version components defined in `platformio.ini`
+2. **Setup Timing**: Moved `checkResetCounter()` to start of `setup()` before delays
 
-3. **MQTT Integration**: All messages include `firmware_version` field
-   - Temperature readings, status updates, error reports
-   - Enables deployment tracking and debugging
+3. **WiFi Mode**: `WIFI_STA` → `WIFI_AP_STA` for simultaneous AP/Station operation
+
+4. **Logging**: Enhanced to show both STA and AP IP addresses
 
 ### Files Modified
-- `temperature-sensor/include/version.h` - New version header
-- `temperature-sensor/platformio.ini` - Added version build flags
-- `temperature-sensor/src/main.cpp` - Updated MQTT messages with version
-- `temperature-sensor/update_version.sh` - New version update script
-- `docs/COPILOT_INSTRUCTIONS.md` - Added versioning documentation
-- `docs/CONFIG.md` - Added version tracking procedures
-- `memory-bank/progress.md` - Implementation tracking
+- `surveillance/src/main.cpp` - Core NVS implementation
+- `surveillance/README.md` - Complete documentation update
+- Root `README.md` - Platform-specific notes added
+- `docs/solar-monitor/README.md` - Portal address corrections
+- 6 files sanitized for security (IPs, usernames removed)
 
 ## Current State
 
 ### Hardware Status
-- ✅ All ESP32 platforms support firmware versioning
-- ✅ OTA updates confirmed working with version tracking
-- ✅ MQTT messages include version information
-- ✅ Build timestamps update automatically
+- ✅ ESP32-S3 surveillance camera fully operational
+- ✅ Triple-reset detection confirmed working
+- ✅ Config portal accessible at 192.168.4.1
+- ✅ Web server streaming video successfully
+- ✅ MQTT connection established and publishing
+- ✅ PSRAM detected and utilized
 
 ### Code Status
-- ✅ Version header compiles successfully
-- ✅ Build flags integrated into PlatformIO
-- ✅ MQTT integration tested and working
-- ✅ Version script executes without errors
+- ✅ All code changes compiled successfully
+- ✅ No errors or warnings
+- ✅ Testing completed on hardware
+- ✅ Serial monitor shows proper reset counting (1/3 → 2/3 → 3/3)
 
 ### Documentation Status
-- ✅ COPILOT_INSTRUCTIONS.md updated with versioning procedures
-- ✅ CONFIG.md includes version tracking examples
-- ✅ Progress tracking documented in memory-bank
-- ✅ All team documentation reflects new capabilities
+- ✅ All READMEs updated with NVS implementation
+- ✅ Platform-specific notes added (ESP32-S3 vs ESP32/ESP8266)
+- ✅ Troubleshooting sections enhanced
+- ✅ Copilot instructions updated
 
 ### Security Status
-- ✅ No hardcoded versions in code
-- ✅ Build timestamps prevent version conflicts
-- ✅ Version tracking enables secure deployment verification
+- ✅ No hardcoded IPs in example files
+- ✅ No usernames in scripts
+- ✅ No secrets or tokens exposed
+- ✅ .gitignore properly configured
+- ✅ CI/CD workflow validates security
 
 ## Platform-Specific Knowledge
 
-### Firmware Versioning Implementation
-**Universal**: Version tracking works across all ESP32 variants (ESP32, ESP32-S3, ESP8266)
+### ESP32-S3 Limitations Discovered
+**Critical**: ESP32-S3 RTC fast memory (RTC_NOINIT_ATTR) does **not** persist reliably across hardware resets, unlike ESP32 and ESP8266.
 
-**Version Format**: MAJOR.MINOR.PATCH-buildYYYYMMDD
-- MAJOR: Breaking changes
-- MINOR: New features
-- PATCH: Bug fixes
-- buildYYYYMMDD: Automatic build timestamp
+**Solution**: Use NVS (Non-Volatile Storage) via Preferences library for guaranteed persistence.
 
-### Version Update Process
-```bash
-# Before each deployment
-./update_version.sh
+### Implementation Pattern for ESP32-S3
+```cpp
+#include <Preferences.h>
+Preferences resetPrefs;
 
-# Build and flash
-pio run -t upload
-```
-
-### MQTT Version Integration
-All MQTT messages include `firmware_version` field:
-```json
-{
-  "temperature": 23.5,
-  "sensor_id": "temp_01",
-  "firmware_version": "1.2.3-build20241225"
+void checkResetCounter() {
+  resetPrefs.begin("reset", false);
+  uint32_t resetCount = resetPrefs.getUInt("reset_cnt", 0);
+  // ... detection logic ...
+  resetPrefs.putUInt("reset_cnt", newCount);
+  resetPrefs.end();
 }
 ```
 
-### Build Flag Configuration
-PlatformIO `platformio.ini` includes:
-```
-build_flags =
-  -D FIRMWARE_VERSION_MAJOR=1
-  -D FIRMWARE_VERSION_MINOR=2
-  -D FIRMWARE_VERSION_PATCH=3
-  -D BUILD_TIMESTAMP=20241225
-```
+### When to Use NVS vs RTC
+- **ESP32-S3**: Always NVS (Preferences)
+- **ESP32/ESP8266**: Can use RTC (faster) or NVS (more reliable)
+- **Multi-platform**: Use NVS for consistency
 
 ## Dependencies
 
 ### Core Libraries
 - PlatformIO Core 6.1.x
 - Arduino ESP32 framework 2.0.x
+- WiFiManager 2.0.17
+- ArduinoJson 6.x
 - PubSubClient (MQTT) 2.8.x
-- ArduinoJson 6.x (for MQTT message construction)
-
-### Versioning System
-- Build script: `update_version.sh` (bash)
-- Version header: `include/version.h`
-- Build flags in `platformio.ini`
+- Preferences library (built-in ESP32)
 
 ### Hardware
-- All ESP32 variants (ESP32, ESP32-S3, ESP8266)
-- DS18B20 temperature sensors
-- OLED displays (optional)
-- Solar monitoring hardware (optional)
+- ESP32-S3 WROOM (8MB Flash, 8MB PSRAM)
+- OV2640 Camera
+- PIR motion sensor (GPIO14 for S3)
 
 ## Current Blockers
 
-**None** - Firmware versioning system fully implemented and tested
+**None** - All work completed successfully
 
 ## Next Actions
 
-1. **Immediate**: Monitor first OTA deployment with version tracking
-2. **Short-term**: Update version numbers for next feature release
-3. **Long-term**: Consider automated version bumping in CI/CD pipeline
+1. **Immediate**: Merge `feature/mqtt-trace-instrumentation` to main
+2. **Short-term**: Test on additional ESP32-S3 boards
+3. **Long-term**: Consider ESP32-C6 support (WiFi 6)

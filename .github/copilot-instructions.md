@@ -31,6 +31,8 @@
 - Skip reading memory-bank context files
 - **Copy secrets.h.example to secrets.h without checking if secrets.h already exists**
 - **Overwrite existing secrets with example values**
+- **Hardcode OTA passwords or credentials in platformio.ini build/upload flags**
+- **Use `${sysenv.VAR}` syntax in platformio.ini - it doesn't work reliably with .env files**
 
 ### ✅ DO:
 - Read documentation thoroughly before suggesting changes
@@ -41,6 +43,8 @@
 - **Always check if `secrets.h` exists before suggesting to copy from `secrets.h.example`**
 - **Preserve existing secrets.h values when updating credentials**
 - **Only use `secrets.h.example` as a template for new projects or missing files**
+- **Use environment variable exports for OTA uploads: `export PLATFORMIO_UPLOAD_FLAGS="--auth=password" && pio run -t upload`**
+- **Keep platformio.ini clean - no hardcoded credentials or upload flags**
 
 ---
 
@@ -125,12 +129,15 @@
 
 ### CONFIG.md Content:
 ```
+✅ Common configuration across all projects
 ✅ secrets.h setup examples
-✅ Detailed deployment commands
-✅ Data query examples
-✅ Specific troubleshooting procedures
-✅ Configuration file formats
-✅ API reference examples
+✅ WiFi/MQTT broker setup
+✅ Deployment commands (USB flash, OTA)
+✅ Common troubleshooting procedures
+✅ Links to project-specific configs:
+   - docs/temperature-sensor/CONFIG.md
+   - docs/surveillance/CONFIG.md
+   - docs/solar-monitor/CONFIG.md
 ```
 
 ### README.md Content:
@@ -396,6 +403,69 @@ Set-NetFirewallProfile -Profile Private -Enabled True
 
 ---
 
+## PlatformIO Configuration Best Practices (December 2025)
+
+**CRITICAL: Never hardcode credentials or authentication in platformio.ini**
+
+### ❌ WRONG - Do NOT Do This:
+```ini
+[env:esp32dev]
+upload_protocol = espota
+upload_flags =
+    --auth=hardcoded_password  # NEVER hardcode credentials!
+    --port=3232
+```
+
+### ✅ CORRECT - Use Environment Variables:
+```bash
+# Export OTA password before upload command
+export PLATFORMIO_UPLOAD_FLAGS="--auth=your_password" && pio run -e esp32dev -t upload --upload-port 192.168.0.x
+```
+
+### Why This Approach?
+1. **Security**: Credentials not committed to git
+2. **Flexibility**: Different passwords per developer/device
+3. **Safety**: No accidental credential exposure in diffs/logs
+4. **Simplicity**: Works reliably without .env file parsing issues
+
+### platformio.ini Configuration
+Keep upload configuration minimal and credential-free:
+```ini
+[env:esp32dev]
+platform = espressif32
+board = esp32dev
+framework = arduino
+monitor_speed = 115200
+upload_speed = 115200
+upload_protocol = espota
+; upload_port and upload_flags configured via environment variables
+; Use: export PLATFORMIO_UPLOAD_FLAGS="--auth=password" && pio run -t upload --upload-port IP
+```
+
+### Common Mistakes to Avoid
+1. **Using `${sysenv.VAR}` in platformio.ini**: Doesn't work reliably with .env files
+2. **Hardcoding `upload_flags` in platformio.ini**: Creates security risks
+3. **Committing credentials to version control**: Major security violation
+4. **Assuming .env file location**: PlatformIO .env handling is inconsistent
+
+### Deployment Scripts
+Create helper scripts in `scripts/` that handle authentication:
+```bash
+#!/bin/bash
+# scripts/deploy-ota.sh
+DEVICE_NAME=$1
+DEVICE_IP=$2
+OTA_PASSWORD=${OTA_PASSWORD:-"default_password"}
+
+export PLATFORMIO_UPLOAD_FLAGS="--auth=$OTA_PASSWORD"
+pio run -e esp32dev -t upload --upload-port $DEVICE_IP
+```
+
+**Issue Identified**: December 24, 2025  
+**Status**: Best practices documented, enforcement via copilot-instructions.md
+
+---
+
 ## Firmware Version Tracking (December 2025)
 
 **All ESP32 devices now include automatic firmware version tracking** for deployment management and OTA verification.
@@ -437,17 +507,37 @@ All MQTT messages include `firmware_version` field:
 
 ### Version Update Process
 
-#### Automatic Build Timestamp
+#### Automatic Version Bumping Script
+**Always use `update_version.sh` before building to ensure consistent versioning across all environments.**
+
+The script automatically updates version across ALL platformio.ini environments:
+
 ```bash
 cd temperature-sensor
-./update_version.sh  # Updates BUILD_TIMESTAMP to current date
+
+# Bump patch version (bug fixes) - 1.0.5 → 1.0.6
+./update_version.sh --patch
+
+# Bump minor version (features) - 1.0.5 → 1.1.0
+./update_version.sh --minor
+
+# Bump major version (breaking changes) - 1.0.5 → 2.0.0
+./update_version.sh --major
+
+# Or just update timestamp to current date (keep same version)
+./update_version.sh
 ```
 
-#### Manual Version Bumps
-For major/minor/patch changes, update platformio.ini:
-```ini
--D FIRMWARE_VERSION_PATCH=3  # Increment for bug fixes
-```
+**Build Process:**
+1. Run `./update_version.sh --patch` (or appropriate bump level)
+2. Run `pio run -e esp32dev -t upload --upload-port 192.168.x.x`
+3. Verify device reports new version in MQTT status
+
+**What the script does:**
+- Updates `FIRMWARE_VERSION_MAJOR`, `FIRMWARE_VERSION_MINOR`, `FIRMWARE_VERSION_PATCH` in all environments
+- Updates `BUILD_TIMESTAMP` to current date (YYYYMMDD format)
+- Maintains consistency across esp32dev, esp32dev-serial, esp8266, esp32s3, etc.
+- Produces version string: `MAJOR.MINOR.PATCH-buildYYYYMMDD`
 
 ### OTA Version Tracking
 
@@ -485,6 +575,171 @@ pio run -e esp32dev -t upload
 **Status**: Active, required for all new builds
 
 
-### Surviellance-arduino project
+### Surveillance-arduino project
 # use the Arduino project for all new work
 # read and build according to ARDUINO_CLI_SETUP.md instructions and BUILD_SYSTEMS.md instructions
+
+---
+
+## ESP32 Deep Sleep Mode (December 2025)
+
+**ESP32 devices support battery-powered deep sleep mode with automatic wake cycles**. This is critical for remote, battery-powered temperature sensors.
+
+### Critical Implementation Requirements
+
+**Two fixes required for ESP32 deep sleep to work**:
+
+1. **WiFi/MQTT Disconnect Before Sleep** ([main.cpp:576-582](../temperature-sensor/src/main.cpp#L576-L582))
+   - Must call `WiFi.disconnect(true)` and `mqttClient.disconnect()` before `esp_deep_sleep_start()`
+   - Without this, RTC timer may not properly configure or wake device
+   - Device will enter deep sleep but **never wake** from timer
+
+2. **MQTT Command Processing Window** ([main.cpp:1023-1029](../temperature-sensor/src/main.cpp#L1023-L1029))
+   - Must add 2-second `mqttClient.loop()` delay after publishing before entering sleep
+   - Allows device to receive and process MQTT commands during wake cycle
+   - Without this, remote configuration via MQTT is **impossible**
+
+### Implementation Pattern
+
+```cpp
+void enterDeepSleepIfEnabled() {
+  if (deepSleepSeconds > 0) {
+    #ifdef ESP32
+      // CRITICAL: Disconnect WiFi/MQTT before sleep
+      Serial.println("[DEEP SLEEP] Disconnecting MQTT and WiFi...");
+      if (mqttClient.connected()) {
+        mqttClient.disconnect();
+      }
+      WiFi.disconnect(true);  // true = turn off WiFi radio
+      delay(100);
+    #endif
+
+    Serial.flush();
+    delay(50);
+
+    #ifdef ESP32
+      uint64_t sleepTime = deepSleepSeconds * 1000000ULL;
+      esp_sleep_enable_timer_wakeup(sleepTime);
+      esp_deep_sleep_start();
+    #endif
+  }
+}
+```
+
+```cpp
+void setup() {
+  // ... WiFi and MQTT connection ...
+
+  if (deepSleepSeconds > 0) {
+    // Skip OTA/web server in deep sleep mode
+    updateTemperatures();
+    publishTemperature();
+    publishStatus();
+
+    // CRITICAL: Wait for MQTT commands before sleeping
+    Serial.println("[DEEP SLEEP] Waiting 5 seconds for MQTT commands...");
+    unsigned long commandWaitStart = millis();
+    while (millis() - commandWaitStart < 5000) {
+      mqttClient.loop();  // Process incoming MQTT messages
+      delay(10);
+    }
+
+    // Now safe to enter deep sleep
+    enterDeepSleepIfEnabled();
+  }
+}
+```
+
+### Deep Sleep Behavior
+
+**When enabled** (`deepSleepSeconds > 0`):
+1. Device wakes from RTC timer
+2. Connects to WiFi and MQTT (2-3 seconds)
+3. Publishes temperature and status
+4. **Waits 5 seconds** processing MQTT commands
+5. Disconnects WiFi/MQTT cleanly
+6. Enters deep sleep
+7. **No web server** or OTA during sleep cycles
+
+**Power Profile**:
+- Active: ~80mA for 8-9 seconds (including 5s command window)
+- Sleep: ~10µA
+- Average (30s cycle): ~3mA
+
+### Remote Configuration via MQTT
+
+**Available Commands**:
+```bash
+# Enable deep sleep (30 seconds)
+mosquitto_pub -h BROKER -t "esp-sensor-hub/DEVICE/command" -m "deepsleep 30"
+
+# Disable deep sleep
+mosquitto_pub -h BROKER -t "esp-sensor-hub/DEVICE/command" -m "deepsleep 0"
+
+# Restart device
+mosquitto_pub -h BROKER -t "esp-sensor-hub/DEVICE/command" -m "restart"
+
+# Request status
+mosquitto_pub -h BROKER -t "esp-sensor-hub/DEVICE/command" -m "status"
+```
+
+**MQTT Topics**:
+- Command: `esp-sensor-hub/{DEVICE}/command`
+- Status: `esp-sensor-hub/{DEVICE}/status`
+- Events: `esp-sensor-hub/{DEVICE}/events`
+- Temperature: `esp-sensor-hub/{DEVICE}/temperature`
+
+### Troubleshooting
+
+**Device won't wake from deep sleep**:
+- Missing WiFi/MQTT disconnect before `esp_deep_sleep_start()`
+- Check serial for: `[DEEP SLEEP] Disconnecting MQTT and WiFi...`
+- Monitor MQTT for temperature publishes (proves wake cycles work)
+- Solution: Add disconnect calls before sleep
+
+**Cannot configure device remotely**:
+- Missing `mqttClient.loop()` processing window after wake
+- Commands sent but device sleeps before processing
+- Check serial for: `[DEEP SLEEP] Waiting 5 seconds for MQTT commands...`
+- Solution: Add 5-second loop delay before entering sleep
+
+**Configuration not persisting**:
+- Deep sleep config saves to SPIFFS/LittleFS
+- Survives firmware updates (unless filesystem erased)
+- Requires device restart to take effect
+- Use MQTT `restart` command after configuration change
+
+### ESP8266 Limitations
+
+**ESP8266 deep sleep is DISABLED by default** (`DISABLE_DEEP_SLEEP=1` in platformio.ini):
+- Requires GPIO 16 → RST hardware modification
+- Without modification, device enters permanent sleep
+- Do NOT enable deep sleep on ESP8266 without hardware mod
+- See CONFIG.md for required circuit diagram
+
+### Files to Reference
+
+- **Implementation**: `temperature-sensor/src/main.cpp`
+  - Deep sleep entry: `enterDeepSleepIfEnabled()` (lines 548-603)
+  - MQTT processing: `setup()` deep sleep branch (lines 1023-1036)
+- **Configuration**: `temperature-sensor/platformio.ini`
+  - ESP8266: `-D DISABLE_DEEP_SLEEP=1`
+  - ESP32: No flag (deep sleep available)
+- **Documentation**: `docs/temperature-sensor/CONFIG.md`
+  - Complete deep sleep section with all commands
+  - Troubleshooting procedures
+  - Power consumption details
+
+### Verification Steps
+
+1. Enable deep sleep: `mosquitto_pub -h BROKER -t "esp-sensor-hub/Spa/command" -m "deepsleep 30"`
+2. Watch events: `mosquitto_sub -h BROKER -t "esp-sensor-hub/Spa/events" -v`
+3. Confirm message: `{"event":"deep_sleep_config","message":"Deep sleep set to 30 seconds via MQTT"}`
+4. Monitor wake cycles: `mosquitto_sub -h BROKER -t "esp-sensor-hub/Spa/#" -v`
+5. See temperature publishes every ~30 seconds
+6. Check serial output for: `*** WOKE FROM DEEP SLEEP (TIMER) ***`
+
+**Issue Discovered**: December 23, 2025
+**Root Causes**: Missing WiFi disconnect, missing MQTT command processing
+**Status**: Fixed, tested, documented
+**Platforms**: ESP32 only (ESP8266 disabled by default)

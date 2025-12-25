@@ -2,6 +2,7 @@
 #define DISPLAY_H
 
 #include <Arduino.h>
+#include "device_config.h"
 
 // Hardware: SSD1306 0.96" 128x64 I2C OLED Display
 // I2C Connections:
@@ -18,8 +19,9 @@
 
 // Set to 1 to enable OLED display, 0 to disable
 // When disabled, stub functions are used to prevent crashes if hardware is not connected
-// Allow override via build flags (e.g., -D OLED_ENABLED=0)
-#ifndef OLED_ENABLED
+// OLED_ENABLED is set in device_config.h - don't override it here
+// Default to 1 only if not already defined elsewhere
+#if !defined(OLED_ENABLED)
 #define OLED_ENABLED 1
 #endif
 

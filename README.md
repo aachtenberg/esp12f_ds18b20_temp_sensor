@@ -21,11 +21,11 @@ Multi-device IoT monitoring platform for ESP32/ESP8266/ESP32-S3 with MQTT data p
 
 ### Projects
 
-**Temperature Sensor** (Active - 3+ Devices Deployed)
+**Temperature Sensor** (Active - 8 Devices Deployed)
 - **Hardware**: ESP8266/ESP32 + DS18B20 temperature sensor
 - **Transport**: MQTT JSON publishing to central broker
-- **Features**: WiFiManager portal config, event logging, optional OLED display
-- **Status**: ✅ Production - Multiple locations monitoring
+- **Features**: WiFiManager portal config, deep sleep mode with smart WiFi retry, event logging, optional OLED display, OTA updates
+- **Status**: ✅ Production - 8 deployed locations (6 updated to v1.1.0, v1.1.1 ready)
 
 **Surveillance Camera** (Active)
 - **Hardware**: ESP32-S3 + OV2640 camera + optional SD card
@@ -45,25 +45,30 @@ Multi-device IoT monitoring platform for ESP32/ESP8266/ESP32-S3 with MQTT data p
 
 **📋 [DEVICE_INVENTORY.md](DEVICE_INVENTORY.md)** - Complete device tracking and update status
 
-### Currently Deployed Devices
-- **Pump House** (ESP8266) - Temperature monitoring, recently updated with MQTT buffer fix
-- **Main Cottage** (ESP8266) - Temperature monitoring  
-- **Small Garage** (ESP32) - Temperature monitoring with OLED display
-- **Big Garage** (ESP32) - Status confirmed via MQTT
-- **Spa** (ESP32) - Status confirmed via MQTT
-- **Sauna** (ESP32) - Status confirmed via MQTT
-- **Mobile Temp Sensor** (ESP8266) - Status confirmed via MQTT
+### Currently Deployed Devices (8 Total)
+- **Pump House** (ESP8266 @ 192.168.0.122) - v1.1.0, memory leak fixes
+- **Main Cottage** (ESP8266 @ 192.168.0.139) - v1.1.0, memory leak fixes
+- **Small Garage** (ESP32 @ 192.168.0.176) - v1.1.0, OLED display, memory leak fixes
+- **Spa** (ESP32 @ 192.168.0.196) - v1.1.0, memory leak + deep sleep fixes (ready for v1.1.1)
+- **Sauna** (ESP32 @ 192.168.0.135) - v1.1.0, memory leak + deep sleep fixes (ready for v1.1.1)
+- **Mobile Temp Sensor** (ESP8266) - v1.1.0, memory leak fixes
+- **Big Garage** (ESP32) - Pending update, MQTT active
+- **Temp Sensor** (Unknown platform) - Pending update, MQTT active
 
-### Update Status
-- ✅ **Pump House**: Updated Dec 22, 2025 - MQTT buffer size fix applied
-- ✅ **Spa**: Updated Dec 22, 2025 - OTA firmware rebuild completed
-- 🔍 **Others**: Monitoring for MQTT publishing issues, updates available via OTA/serial
+### Update Status (Dec 24, 2025)
+- ✅ **v1.1.1-build20251224** - Smart WiFi retry for deep sleep devices (ready to deploy)
+- ✅ **v1.1.0-build20251223** - Memory leak fixes deployed to 6 devices
+- ✅ **Critical fixes**: Smart WiFi retry prevents battery drain, DoubleResetDetector heap→stack, String→char[] conversions
+- ✅ **ESP32 deep sleep**: WiFi/MQTT disconnect + 2s command window fixes
+- ⏳ **2 devices pending**: Big Garage, Temp Sensor (require serial access)
 
-**Recent Findings (Dec 22, 2025)**:
-- Temperature sensor MQTT issues typically caused by DS18B20 hardware failures, not firmware
-- All devices require MQTT_MAX_PACKET_SIZE=2048 for ESP32 (512 for ESP8266) 
-- WSL2 OTA uploads require Windows Firewall workaround
-- Device health monitoring available via `/health` endpoint
+**Recent Critical Fixes**:
+- **v1.1.1 - Smart WiFi Retry**: Deep sleep devices retry WiFi 3x without starting captive portal, conserving battery on transient failures
+- **v1.1.0 - Memory leak elimination**: ~100+ bytes/boot saved (DoubleResetDetector stack allocation)
+- **v1.1.0 - Heap fragmentation fix**: String operations replaced with snprintf()
+- **v1.1.0 - ESP32 deep sleep**: Fixed wake-up and remote configuration via MQTT
+- **v1.0.3 - MQTT reconnection**: Simplified 12-hour timeout bug
+- **Platform support**: MQTT_MAX_PACKET_SIZE=2048 (ESP32), 512 (ESP8266)
 
 ---
 
@@ -199,6 +204,7 @@ GND → GND                 GND → GND
 
 ### Features
 
+- **Deep Sleep Mode** (ESP32 only) - Battery-optimized with RTC timer wake cycles, MQTT remote configuration
 - Temperature monitoring in °C and °F via MQTT
 - **OTA firmware updates** - Update devices over WiFi without USB cable
 - MQTT JSON publishing every 30 seconds
@@ -208,14 +214,16 @@ GND → GND                 GND → GND
 - WiFi auto-reconnect with failure tracking
 - Serial logging for debugging
 - **Battery monitoring** (ESP32 only) - Voltage and percentage tracking for battery-powered deployments
+- **Remote configuration** via MQTT commands (deep sleep, status, restart)
 
 ### MQTT Topics
 
 | Topic | Payload | Retained |
 |-------|---------|----------|
 | `esp-sensor-hub/{device}/temperature` | `{device, chip_id, timestamp, celsius, fahrenheit}` | No |
-| `esp-sensor-hub/{device}/status` | `{device, uptime, wifi_connected, rssi, free_heap, ...}` | **Yes** |
+| `esp-sensor-hub/{device}/status` | `{device, uptime, wifi_connected, rssi, free_heap, deep_sleep_seconds, ...}` | **Yes** |
 | `esp-sensor-hub/{device}/events` | `{event, severity, message, ...}` | No |
+| `esp-sensor-hub/{device}/command` | `deepsleep N`, `status`, `restart` | No |
 
 ### OLED Display Content (When Enabled)
 
@@ -273,13 +281,14 @@ The ESP32 solar monitor publishes real-time solar metrics (voltage, current, pow
 
 | Project | Status | Devices | Data Transport |
 |---------|--------|---------|-----------------|
-| Temperature Sensor | ✅ Production | 3+ deployed | MQTT JSON |
+| Temperature Sensor | ✅ Production | 8 deployed (6 @ v1.1.0) | MQTT JSON |
 | Surveillance Camera | ✅ Production | 1 deployed | MQTT JSON + Web stream |
 | Solar Monitor | ✅ Production | 1 deployed | MQTT JSON |
 | Backend | ✅ Running | Raspberry Pi 4 | InfluxDB v3 (optional bridge) |
 
 ---
 
-**Last Updated**: December 22, 2025  
-**Current Branch**: main  
+**Last Updated**: December 23, 2025
+**Current Version**: v1.1.0-build20251223 (Memory leak fixes, deep sleep improvements)
+**Current Branch**: feature/battery-deep-sleep-optimizations
 **Architecture**: MQTT-based data streaming with optional InfluxDB v3 integration

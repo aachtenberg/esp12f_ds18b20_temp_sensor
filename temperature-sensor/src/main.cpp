@@ -37,8 +37,8 @@
 #define DRD_TIMEOUT 3           // Seconds to wait for second reset
 #define DRD_ADDRESS 0           // RTC memory address (ESP8266) or EEPROM address (ESP32)
 
-// Create Double Reset Detector instance
-DoubleResetDetector* drd;
+// Create Double Reset Detector instance (stack allocation, no memory leak)
+DoubleResetDetector drd(DRD_TIMEOUT, DRD_ADDRESS);
 
 // Device name storage
 char deviceName[40] = "Temp Sensor";  // Default name
@@ -73,6 +73,14 @@ struct DeviceMetrics {
 // Global instances
 DeviceMetrics metrics;
 
+// Deep sleep configuration
+int deepSleepSeconds = 0;  // Default disabled
+volatile bool otaInProgress = false;  // Tracks active OTA upload to prevent sleep during transfer
+const char* DEEP_SLEEP_FILE = "/deep_sleep_seconds.txt";
+
+// Track if we just woke from deep sleep to prevent immediate re-sleep
+bool justWokeFromSleep = false;
+
 // Data wire is connected to GPIO 4
 OneWire oneWire(ONE_WIRE_PIN);
 
@@ -98,20 +106,14 @@ PubSubClient mqttClient(espClient);
 String chipId;
 String topicBase;
 unsigned long lastMqttReconnectAttempt = 0;
-unsigned long lastMqttConnectionCheck = 0;  // Track when we last checked MQTT status
+unsigned long lastMqttConnectionCheck = 0;
 unsigned long lastPublishTime = 0;
 unsigned long lastSuccessfulMqttCheck = 0;
-unsigned long mqttReconnectInterval = 5000;  // Dynamic backoff interval
-unsigned long mqttBackoffResetTime = 0;      // Track when backoff started for periodic reset
-unsigned int mqttConsecutiveFailures = 0;    // Count consecutive connection failures
-int lastMqttState = MQTT_DISCONNECTED;       // Track last known MQTT state for change detection
+int lastMqttState = MQTT_DISCONNECTED;
 const unsigned long MQTT_RECONNECT_INTERVAL_MS = 5000;
-const unsigned long MQTT_RECONNECT_INTERVAL_MAX_MS = 30000;  // Max 30s backoff (reduced from 60s)
-const unsigned long MQTT_CONNECTION_CHECK_INTERVAL_MS = 30000;  // Check connection health every 30s
+const unsigned long MQTT_CONNECTION_CHECK_INTERVAL_MS = 30000;
 const unsigned long MQTT_PUBLISH_INTERVAL_MS = 30000;
 const unsigned long MQTT_STALE_CONNECTION_TIMEOUT_MS = 120000;  // Force reconnect if no activity for 2 mins
-const unsigned long MQTT_BACKOFF_RESET_INTERVAL_MS = 300000;   // Reset backoff to minimum every 5 mins
-const unsigned int MQTT_MAX_CONSECUTIVE_FAILURES = 10;         // Reset backoff after this many failures
 
 // WiFi reconnection tracking
 unsigned long wifiDisconnectedSince = 0;
@@ -175,14 +177,76 @@ void saveDeviceName(const char* name) {
   }
 }
 
+// Load deep sleep config from filesystem
+void loadDeepSleepConfig() {
+#ifdef ESP32
+  if (!SPIFFS.begin(true)) {
+    Serial.println("[FS] Failed to mount SPIFFS");
+    deepSleepSeconds = 0;
+    return;
+  }
+  // Load deepSleepSeconds from SPIFFS file
+  File file = SPIFFS.open(DEEP_SLEEP_FILE, "r");
+  if (file) {
+    deepSleepSeconds = file.readStringUntil('\n').toInt();
+    file.close();
+    Serial.printf("[DEEP SLEEP] Loaded config: %d seconds\n", deepSleepSeconds);
+  } else {
+    deepSleepSeconds = 0; // Default: no deep sleep
+    Serial.println("[DEEP SLEEP] No config file found, defaulting to 0 (no deep sleep)");
+  }
+#else // ESP8266
+  if (!LittleFS.begin()) {
+    Serial.println("[FS] Failed to mount LittleFS");
+    deepSleepSeconds = 0;
+    return;
+  }
+  // Load deepSleepSeconds from LittleFS file
+  File file = LittleFS.open(DEEP_SLEEP_FILE, "r");
+  if (file) {
+    deepSleepSeconds = file.readStringUntil('\n').toInt();
+    file.close();
+    Serial.printf("[DEEP SLEEP] Loaded config: %d seconds\n", deepSleepSeconds);
+  } else {
+    deepSleepSeconds = 0; // Default: no deep sleep
+    Serial.println("[DEEP SLEEP] No config file found, defaulting to 0 (no deep sleep)");
+  }
+#endif
+}
+
+// Save deep sleep config to filesystem
+void saveDeepSleepConfig() {
+#ifdef ESP32
+  if (!SPIFFS.begin(true)) {
+    Serial.println("[FS] Failed to mount SPIFFS for save");
+    return;
+  }
+  File file = SPIFFS.open(DEEP_SLEEP_FILE, "w");
+#else // ESP8266
+  if (!LittleFS.begin()) {
+    Serial.println("[FS] Failed to mount LittleFS for save");
+    return;
+  }
+  File file = LittleFS.open(DEEP_SLEEP_FILE, "w");
+#endif
+  if (file) {
+    file.println(deepSleepSeconds);
+    file.close();
+    Serial.printf("[DEEP SLEEP] Saved config: %d seconds\n", deepSleepSeconds);
+  } else {
+    Serial.println("[DEEP SLEEP] Failed to save config file");
+  }
+}
+
 // Forward declarations
 String generateChipId();
 String sanitizeDeviceName(const char* name);
 void updateTopicBase();
 bool ensureMqttConnected();
 void publishEvent(const String& eventType, const String& message, const String& severity = "info");
-void publishTemperature();
+bool publishTemperature();
 void publishStatus();
+void mqttCallback(char* topic, byte* payload, unsigned int length);
 
 // Validate that temperature reading is valid
 bool isValidTemperature(const String& temp) {
@@ -306,6 +370,10 @@ String getTopicEvents() {
   return topicBase + "/events";
 }
 
+String getTopicCommand() {
+  return topicBase + "/command";
+}
+
 // Helper to get MQTT state description for logging
 const char* getMqttStateString(int state) {
   switch (state) {
@@ -320,6 +388,30 @@ const char* getMqttStateString(int state) {
     case MQTT_CONNECT_BAD_CREDENTIALS: return "BAD_CREDENTIALS";
     case MQTT_CONNECT_UNAUTHORIZED: return "UNAUTHORIZED";
     default: return "UNKNOWN";
+  }
+}
+
+// Gracefully disconnect from MQTT broker with proper cleanup
+void gracefulMqttDisconnect() {
+  if (!mqttClient.connected()) {
+    return;  // Already disconnected
+  }
+  
+  Serial.println("[MQTT] Initiating graceful disconnect...");
+  mqttClient.disconnect();
+  
+  // Wait up to 500ms for graceful disconnect to complete
+  // PubSubClient needs time to properly close the TCP connection
+  unsigned long disconnectStart = millis();
+  while (mqttClient.connected() && (millis() - disconnectStart) < 500) {
+    mqttClient.loop();  // Allow MQTT client to process disconnect
+    yield();  // Feed watchdog and allow background tasks
+  }
+  
+  if (mqttClient.connected()) {
+    Serial.println("[MQTT] Timeout waiting for graceful disconnect");
+  } else {
+    Serial.println("[MQTT] Gracefully disconnected from broker");
   }
 }
 
@@ -342,13 +434,11 @@ bool ensureMqttConnected() {
       Serial.println("[MQTT] Stale connection detected - forcing reconnect");
       Serial.printf("[MQTT] Last successful publish was %lu seconds ago\n",
                     (now - metrics.lastSuccessfulMqttPublish) / 1000);
-      mqttClient.disconnect();
+      gracefulMqttDisconnect();
       delay(100);
       // Fall through to reconnection logic below
     } else {
       lastSuccessfulMqttCheck = now;
-      mqttConsecutiveFailures = 0;  // Reset failure count on successful connection
-      mqttBackoffResetTime = 0;     // Reset backoff timer
       return true;
     }
   }
@@ -358,32 +448,12 @@ bool ensureMqttConnected() {
     return false;
   }
 
-  // Periodic backoff reset: if we've been failing for too long, reset to try more aggressively
-  if (mqttBackoffResetTime > 0 && (now - mqttBackoffResetTime) > MQTT_BACKOFF_RESET_INTERVAL_MS) {
-    Serial.println("[MQTT] Backoff reset - trying more aggressively");
-    mqttReconnectInterval = MQTT_RECONNECT_INTERVAL_MS;
-    mqttBackoffResetTime = now;
-    mqttConsecutiveFailures = 0;
-  }
-
-  // Also reset backoff after too many consecutive failures (try fresh)
-  if (mqttConsecutiveFailures >= MQTT_MAX_CONSECUTIVE_FAILURES) {
-    Serial.printf("[MQTT] %u consecutive failures - resetting backoff\n", mqttConsecutiveFailures);
-    mqttReconnectInterval = MQTT_RECONNECT_INTERVAL_MS;
-    mqttConsecutiveFailures = 0;
-  }
-
-  // Rate limit reconnection attempts using dynamic backoff interval
-  if (lastMqttReconnectAttempt > 0 && (now - lastMqttReconnectAttempt) < mqttReconnectInterval) {
+  // Simple rate limit: don't try reconnecting too frequently
+  if (lastMqttReconnectAttempt > 0 && (now - lastMqttReconnectAttempt) < MQTT_RECONNECT_INTERVAL_MS) {
     return false;
   }
 
   lastMqttReconnectAttempt = now;
-
-  // Start tracking backoff time on first failure
-  if (mqttBackoffResetTime == 0) {
-    mqttBackoffResetTime = now;
-  }
 
   String clientId = String(deviceName) + "-" + chipId;
   Serial.printf("[MQTT] Attempting connection to %s:%d as %s\n",
@@ -399,20 +469,16 @@ bool ensureMqttConnected() {
 
   if (connected) {
     Serial.println("[MQTT] Connected to broker");
+    // Subscribe to command topic
+    mqttClient.subscribe(getTopicCommand().c_str());
+    Serial.printf("[MQTT] Subscribed to command topic: %s\n", getTopicCommand().c_str());
     lastSuccessfulMqttCheck = now;
-    mqttReconnectInterval = MQTT_RECONNECT_INTERVAL_MS;  // Reset backoff on success
-    mqttConsecutiveFailures = 0;
-    mqttBackoffResetTime = 0;
     lastMqttState = MQTT_CONNECTED;
   } else {
-    mqttConsecutiveFailures++;
     int state = mqttClient.state();
-    Serial.printf("[MQTT] Connection failed: %s (state: %d), failures: %u, retry in %lu sec\n",
-                  getMqttStateString(state), state, mqttConsecutiveFailures,
-                  mqttReconnectInterval / 1000);
+    Serial.printf("[MQTT] Connection failed: %s (state: %d), retry in %lu sec\n",
+                  getMqttStateString(state), state, MQTT_RECONNECT_INTERVAL_MS / 1000);
     metrics.mqttPublishFailures++;
-    // Exponential backoff: double interval up to max
-    mqttReconnectInterval = min(mqttReconnectInterval * 2, MQTT_RECONNECT_INTERVAL_MAX_MS);
   }
   return connected;
 }
@@ -454,11 +520,11 @@ void publishEvent(const String& eventType, const String& message, const String& 
   publishJson(getTopicEvents(), doc, false);
 }
 
-void publishTemperature() {
+bool publishTemperature() {
   if (!isValidTemperature(temperatureC)) {
-    return;
+    return false;
   }
-  
+
   StaticJsonDocument<256> doc;
   doc["device"] = deviceName;
   doc["chip_id"] = chipId;
@@ -475,7 +541,7 @@ void publishTemperature() {
   doc["timestamp"] = millis() / 1000;
   doc["celsius"] = temperatureC.toFloat();
   doc["fahrenheit"] = temperatureF.toFloat();
-  publishJson(getTopicTemperature(), doc, false);
+  return publishJson(getTopicTemperature(), doc, false);
 }
 
 void publishStatus() {
@@ -495,6 +561,8 @@ void publishStatus() {
   doc["sensor_healthy"] = isValidTemperature(temperatureC);
   doc["wifi_reconnects"] = metrics.wifiReconnects;
   doc["sensor_read_failures"] = metrics.sensorReadFailures;
+  doc["deep_sleep_enabled"] = (deepSleepSeconds > 0);
+  doc["deep_sleep_seconds"] = deepSleepSeconds;
   #ifdef BATTERY_MONITOR_ENABLED
     if (metrics.batteryPercent >= 0) {
       doc["battery_voltage"] = metrics.batteryVoltage;
@@ -502,6 +570,61 @@ void publishStatus() {
     }
   #endif
   publishJson(getTopicStatus(), doc, true);
+}
+
+// Enter deep sleep if configured
+void enterDeepSleepIfEnabled() {
+  // Check if deep sleep is disabled at compile time (e.g., for ESP8266 without GPIO16→RST wiring)
+  #ifdef DISABLE_DEEP_SLEEP
+    if (deepSleepSeconds > 0) {
+      Serial.println("[DEEP SLEEP] Deep sleep is disabled on this device (DISABLE_DEEP_SLEEP flag set)");
+    }
+    return;
+  #endif
+
+  if (deepSleepSeconds > 0) {
+    Serial.println();
+    Serial.println("========================================");
+    Serial.println("  DEEP SLEEP ACTIVATED");
+    Serial.println("========================================");
+    Serial.printf("[DEEP SLEEP] Entering deep sleep for %d seconds...\n", deepSleepSeconds);
+    #ifdef ESP8266
+      Serial.println();
+      Serial.println("*** CRITICAL HARDWARE REQUIREMENT ***");
+      Serial.println("GPIO 16 (D0) MUST be connected to RST pin for wake-up!");
+      Serial.println("Without this connection, device will sleep FOREVER!");
+      Serial.println("Circuit: RST ──► 10KΩ ──► GPIO 16, with 0.1µF cap GPIO16─►GND");
+      Serial.println("*** END HARDWARE REQUIREMENT ***");
+      Serial.println();
+    #endif
+    #ifdef ESP32
+      Serial.println("[DEEP SLEEP] ESP32 RTC timer configured - no hardware mods needed");
+
+      // Gracefully disconnect MQTT and WiFi before deep sleep
+      Serial.println("[DEEP SLEEP] Disconnecting MQTT and WiFi...");
+      gracefulMqttDisconnect();
+      WiFi.disconnect(true);  // true = turn off WiFi radio
+      delay(100);  // Give time for WiFi to power down
+    #endif
+
+    // Flush serial before sleeping
+    Serial.flush();
+    delay(50);
+
+#ifdef ESP8266
+    // ESP8266 deep sleep with timer requires GPIO 16 (D0) connected to RST pin
+    // For proper wake-up: RST -> 10K resistor -> GPIO 16, with 0.1µF capacitor RST->GND
+    ESP.deepSleep(deepSleepSeconds * 1000000ULL); // microseconds
+#else // ESP32
+    // ESP32 has built-in RTC - no hardware modifications needed
+    uint64_t sleepTime = deepSleepSeconds * 1000000ULL;
+    Serial.printf("[DEEP SLEEP] Configuring RTC timer for %llu microseconds\n", sleepTime);
+    esp_sleep_enable_timer_wakeup(sleepTime);
+    Serial.println("[DEEP SLEEP] Starting deep sleep NOW...");
+    Serial.flush();
+    esp_deep_sleep_start();
+#endif
+  }
 }
 
 // HTML page with template placeholders
@@ -577,6 +700,85 @@ void handleHealth() {
   server.send(200, "application/json", response);
 }
 
+void handleDeepSleepGet() {
+  JsonDocument doc;
+  doc["deep_sleep_seconds"] = deepSleepSeconds;
+  doc["device"] = deviceName;
+  String response;
+  serializeJson(doc, response);
+  server.send(200, "application/json", response);
+}
+
+void handleDeepSleepPost() {
+  if (server.hasArg("seconds")) {
+    int newSeconds = server.arg("seconds").toInt();
+    if (newSeconds >= 0 && newSeconds <= 3600) { // Max 1 hour
+      deepSleepSeconds = newSeconds;
+      saveDeepSleepConfig();
+
+      char msg[64];
+      snprintf(msg, sizeof(msg), "Deep sleep set to %d seconds", deepSleepSeconds);
+      publishEvent("deep_sleep_config", msg, "info");
+
+      char response[64];
+      snprintf(response, sizeof(response), "{\"status\":\"ok\",\"deep_sleep_seconds\":%d}", deepSleepSeconds);
+      server.send(200, "application/json", response);
+    } else {
+      server.send(400, "application/json", "{\"error\":\"Invalid seconds value (0-3600)\"}");
+    }
+  } else {
+    server.send(400, "application/json", "{\"error\":\"Missing 'seconds' parameter\"}");
+  }
+}
+
+void mqttCallback(char* topic, byte* payload, unsigned int length) {
+  // Use char arrays instead of String to avoid heap fragmentation
+  // Buffer size increased to 128 bytes for future command extensions
+  char payloadStr[128];
+  unsigned int copyLen = min(length, sizeof(payloadStr) - 1);
+  memcpy(payloadStr, payload, copyLen);
+  payloadStr[copyLen] = '\0';
+
+  Serial.printf("[MQTT] Received command: %s = %s\n", topic, payloadStr);
+
+  // Handle deep sleep configuration commands (exact topic match to avoid false positives)
+  if (strcmp(topic, getTopicCommand().c_str()) == 0) {
+    if (strncmp(payloadStr, "deepsleep ", 10) == 0) {
+      int newSeconds = atoi(payloadStr + 10); // Parse number after "deepsleep "
+      if (newSeconds >= 0 && newSeconds <= 3600) { // Max 1 hour
+        // Warn about inefficient sleep intervals
+        if (newSeconds > 0 && newSeconds < 10) {
+          Serial.printf("[WARNING] Deep sleep interval %ds is very short - WiFi overhead may drain battery\n", newSeconds);
+          publishEvent("deep_sleep_warning", "Sleep interval < 10s causes excessive WiFi overhead", "warning");
+        }
+        // Warn if OTA is active
+        if (otaInProgress) {
+          Serial.println("[WARNING] OTA upload in progress - ignoring deep sleep change");
+          publishEvent("ota_warning", "Ignored deep sleep change during active OTA upload", "warning");
+          return;
+        }
+        deepSleepSeconds = newSeconds;
+        saveDeepSleepConfig();
+
+        char msg[64];
+        snprintf(msg, sizeof(msg), "Deep sleep set to %d seconds via MQTT", deepSleepSeconds);
+        publishEvent("deep_sleep_config", msg, "info");
+        publishStatus(); // Publish updated status
+      } else {
+        char msg[64];
+        snprintf(msg, sizeof(msg), "Invalid deep sleep seconds: %d", newSeconds);
+        publishEvent("command_error", msg, "error");
+      }
+    } else if (strcmp(payloadStr, "status") == 0) {
+      publishStatus();
+    } else if (strcmp(payloadStr, "restart") == 0) {
+      publishEvent("device_restart", "Restarting device via MQTT command", "warning");
+      delay(500);
+      ESP.restart();
+    }
+  }
+}
+
 void setupWebServer() {
 #ifndef API_ENDPOINTS_ONLY
   server.on("/", HTTP_GET, handleRoot);
@@ -584,38 +786,25 @@ void setupWebServer() {
   server.on("/temperaturec", HTTP_GET, handleTemperatureC);
   server.on("/temperaturef", HTTP_GET, handleTemperatureF);
   server.on("/health", HTTP_GET, handleHealth);
+  server.on("/deepsleep", HTTP_GET, handleDeepSleepGet);
+  server.on("/deepsleep", HTTP_POST, handleDeepSleepPost);
   server.begin();
   Serial.println("[HTTP] Web server started on port 80");
 }
 
 void setupWiFi() {
-  // Initialize Double Reset Detector
-  drd = new DoubleResetDetector(DRD_TIMEOUT, DRD_ADDRESS);
+  // Double Reset Detector already initialized globally (no memory leak)
 
-  // Create WiFiManager instance
-  WiFiManager wm;
-
-  // Set custom AP name based on device location
-  String apName = String(deviceName);
-  apName.replace(" ", "-");
-  apName = "Temp-" + apName + "-Setup";
-
-  // Create custom parameter for device name (must persist throughout function)
-  WiFiManagerParameter custom_device_name("device_name", "Device Name", deviceName, 40);
-  wm.addParameter(&custom_device_name);
-
-  // Don't use timeout - keep retrying forever in weak WiFi zones
-  wm.setConnectTimeout(0);
-  
-  // Enable WiFi power save mode (modem sleep) for low power operation
+  // Disable WiFi power save on all devices for reliable OTA/MQTT
+  // Deep sleep (when enabled) handles power saving for battery devices
   #ifdef ESP32
-    WiFi.setSleep(true);
-    esp_wifi_set_ps(WIFI_PS_MIN_MODEM);
+    WiFi.setSleep(false);
+    esp_wifi_set_ps(WIFI_PS_NONE);
   #else
-    WiFi.setSleepMode(WIFI_LIGHT_SLEEP);
+    WiFi.setSleepMode(WIFI_NONE_SLEEP);  // Disable power save on ESP8266
   #endif
-  Serial.println("[POWER] WiFi modem sleep enabled");
-  
+  Serial.println("[POWER] WiFi power save disabled (full radio power for OTA/MQTT reliability)");
+
   WiFi.mode(WIFI_STA);
   // Enable auto-reconnect and persist credentials (low-power friendly)
   #ifdef ESP8266
@@ -625,20 +814,29 @@ void setupWiFi() {
     // ESP32 also supports auto reconnect in Arduino core
     WiFi.setAutoReconnect(true);
   #endif
-  
-  // Check for double reset - enter config portal if detected
-  if (drd->detectDoubleReset()) {
+
+  // Check for double reset - always enter config portal if detected
+  if (drd.detectDoubleReset()) {
     Serial.println();
     Serial.println("========================================");
     Serial.println("  DOUBLE RESET DETECTED");
     Serial.println("  Starting WiFi Configuration Portal");
     Serial.println("========================================");
     Serial.println();
+
+    WiFiManager wm;
+    String apName = String(deviceName);
+    apName.replace(" ", "-");
+    apName = "Temp-" + apName + "-Setup";
+
     Serial.println("[WiFi] Connect to AP: " + apName);
     Serial.println("[WiFi] Then open http://192.168.4.1 in browser");
     Serial.println();
 
-    // Set save config callback to save device name
+    WiFiManagerParameter custom_device_name("device_name", "Device Name", deviceName, 40);
+    wm.addParameter(&custom_device_name);
+    wm.setConnectTimeout(0);
+
     bool shouldSaveConfig = false;
     wm.setSaveConfigCallback([&shouldSaveConfig](){
       Serial.println("[Config] Configuration saved, will update device name...");
@@ -651,7 +849,6 @@ void setupWiFi() {
       delay(3000);
       ESP.restart();
     } else {
-      // Save the device name if config was saved
       if (shouldSaveConfig) {
         const char* newName = custom_device_name.getValue();
         Serial.print("[Config] New device name: ");
@@ -660,8 +857,7 @@ void setupWiFi() {
         strcpy(deviceName, newName);
         updateTopicBase();
         saveDeviceName(deviceName);
-        
-        // Log configuration change with details
+
         if (oldName != String(newName)) {
           publishEvent("device_configured", "Name: '" + oldName + "' -> '" + String(newName) + "', SSID: " + WiFi.SSID() + ", IP: " + WiFi.localIP().toString(), "info");
         } else {
@@ -669,48 +865,125 @@ void setupWiFi() {
         }
       }
     }
-  } else {
-    Serial.println("[WiFi] Normal boot - attempting connection...");
-    // Removed verbose double-reset message to reduce logging
+    return;  // Exit early after portal configuration
+  }
 
-    // Set save config callback for autoConnect mode
+  // Normal boot: attempt WiFi connection with retry logic
+  Serial.println("[WiFi] Normal boot - attempting connection...");
+
+  // Check if we have saved credentials
+  if (WiFi.SSID().length() == 0) {
+    Serial.println("[WiFi] No saved credentials found");
+
+    // For deep sleep devices, skip portal and go to sleep - will retry on next wake
+    if (deepSleepSeconds > 0) {
+      Serial.println("[WiFi] Deep sleep enabled - will retry on next wake cycle");
+      Serial.println("[WiFi] Tip: Double-tap reset button to configure WiFi");
+      return;
+    }
+
+    // For non-deep-sleep devices, start config portal
+    Serial.println("[WiFi] Starting configuration portal...");
+    WiFiManager wm;
+    String apName = String(deviceName);
+    apName.replace(" ", "-");
+    apName = "Temp-" + apName + "-Setup";
+
+    WiFiManagerParameter custom_device_name("device_name", "Device Name", deviceName, 40);
+    wm.addParameter(&custom_device_name);
+    wm.setConnectTimeout(0);
+
     bool shouldSaveConfig = false;
     wm.setSaveConfigCallback([&shouldSaveConfig](){
-      Serial.println("[Config] Configuration saved, will update device name...");
       shouldSaveConfig = true;
     });
 
-    if (!wm.autoConnect(apName.c_str())) {
-      Serial.println("[WiFi] Failed to connect - running in offline mode");
-      // Removed verbose double-reset message to reduce logging
-    } else if (shouldSaveConfig) {
-      // Save the device name if config was saved
+    if (wm.autoConnect(apName.c_str()) && shouldSaveConfig) {
       const char* newName = custom_device_name.getValue();
-      Serial.print("[Config] New device name: ");
-      Serial.println(newName);
+      strcpy(deviceName, newName);
+      updateTopicBase();
+      saveDeviceName(deviceName);
+    }
+    return;
+  }
+
+  // We have saved credentials - attempt connection with retries
+  Serial.printf("[WiFi] Connecting to saved network: %s\n", WiFi.SSID().c_str());
+
+  // For deep sleep devices: retry without starting portal on failure
+  if (deepSleepSeconds > 0) {
+    const int MAX_RETRIES = 3;
+    const unsigned long RETRY_TIMEOUT_MS = 10000;  // 10 seconds per attempt
+
+    for (int attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+      Serial.printf("[WiFi] Connection attempt %d/%d...\n", attempt, MAX_RETRIES);
+
+      WiFi.begin();  // Use saved credentials
+
+      unsigned long startAttempt = millis();
+      while (WiFi.status() != WL_CONNECTED && (millis() - startAttempt) < RETRY_TIMEOUT_MS) {
+        delay(100);
+      }
+
+      if (WiFi.status() == WL_CONNECTED) {
+        Serial.printf("[WiFi] Connected! IP: %s, RSSI: %d dBm\n",
+                      WiFi.localIP().toString().c_str(), WiFi.RSSI());
+        publishEvent("wifi_connected", "Connected to " + WiFi.SSID() + " with IP " + WiFi.localIP().toString(), "info");
+        return;
+      }
+
+      Serial.printf("[WiFi] Attempt %d failed (status: %d)\n", attempt, WiFi.status());
+
+      if (attempt < MAX_RETRIES) {
+        Serial.println("[WiFi] Retrying...");
+        WiFi.disconnect();
+        delay(2000);  // Wait before retry
+      }
+    }
+
+    // All retries failed - don't start portal, will retry on next wake
+    Serial.println("[WiFi] All connection attempts failed");
+    Serial.println("[WiFi] Battery-powered device - skipping portal to conserve power");
+    Serial.println("[WiFi] Will retry on next wake cycle");
+    Serial.println("[WiFi] Tip: Double-tap reset button if you need to reconfigure WiFi");
+    return;
+  }
+
+  // For non-deep-sleep devices: use WiFiManager with portal fallback
+  WiFiManager wm;
+  String apName = String(deviceName);
+  apName.replace(" ", "-");
+  apName = "Temp-" + apName + "-Setup";
+
+  WiFiManagerParameter custom_device_name("device_name", "Device Name", deviceName, 40);
+  wm.addParameter(&custom_device_name);
+  wm.setConnectTimeout(0);
+
+  bool shouldSaveConfig = false;
+  wm.setSaveConfigCallback([&shouldSaveConfig](){
+    shouldSaveConfig = true;
+  });
+
+  if (!wm.autoConnect(apName.c_str())) {
+    Serial.println("[WiFi] Failed to connect - running in offline mode");
+  } else {
+    Serial.printf("[WiFi] Connected to %s, IP: %s, RSSI: %d dBm\n",
+                  WiFi.SSID().c_str(), WiFi.localIP().toString().c_str(), WiFi.RSSI());
+    publishEvent("wifi_connected", "Connected to " + WiFi.SSID() + " with IP " + WiFi.localIP().toString(), "info");
+
+    if (shouldSaveConfig) {
+      const char* newName = custom_device_name.getValue();
       String oldName = String(deviceName);
       strcpy(deviceName, newName);
       updateTopicBase();
       saveDeviceName(deviceName);
-      
-      // Log configuration change with details
+
       if (oldName != String(newName)) {
         publishEvent("device_configured", "Name: '" + oldName + "' -> '" + String(newName) + "', SSID: " + WiFi.SSID() + ", IP: " + WiFi.localIP().toString(), "info");
       } else {
         publishEvent("device_configured", "WiFi reconfigured - SSID: " + WiFi.SSID() + ", IP: " + WiFi.localIP().toString() + ", Name unchanged: " + oldName, "info");
       }
     }
-  }
-
-  // Print connection status - simplified
-  if (WiFi.status() == WL_CONNECTED) {
-    Serial.printf("[WiFi] Connected to %s, IP: %s, RSSI: %d dBm\n",
-                  WiFi.SSID().c_str(), WiFi.localIP().toString().c_str(), WiFi.RSSI());
-    
-    // Log WiFi connection event
-    publishEvent("wifi_connected", "Connected to " + WiFi.SSID() + " with IP " + WiFi.localIP().toString(), "info");
-  } else {
-    Serial.println("[WiFi] Not connected - running in offline mode");
   }
 }
 
@@ -741,6 +1014,9 @@ void setup() {
     Serial.println(ESP.getResetReason());
     Serial.print("[DEBUG] Free heap: ");
     Serial.println(ESP.getFreeHeap());
+  #else
+    Serial.printf("[DEBUG] Reset reason code: 0x%02x\n", esp_reset_reason());
+    Serial.printf("[DEBUG] Free heap: %u bytes\n", ESP.getFreeHeap());
   #endif
 
   Serial.println();
@@ -749,8 +1025,64 @@ void setup() {
   Serial.println("========================================");
   Serial.println();
 
+  // Detect wake from deep sleep
+  #ifdef ESP32
+    esp_sleep_wakeup_cause_t wakeupCause = esp_sleep_get_wakeup_cause();
+    switch (wakeupCause) {
+      case ESP_SLEEP_WAKEUP_TIMER:
+        Serial.println();
+        Serial.println("  *** WOKE FROM DEEP SLEEP (TIMER) ***");
+        Serial.println();
+        justWokeFromSleep = true;
+        break;
+      case ESP_SLEEP_WAKEUP_GPIO:
+        Serial.println();
+        Serial.println("  *** WOKE FROM DEEP SLEEP (GPIO) ***");
+        Serial.println();
+        justWokeFromSleep = true;
+        break;
+      case ESP_SLEEP_WAKEUP_UART:
+        Serial.println();
+        Serial.println("  *** WOKE FROM DEEP SLEEP (UART) ***");
+        Serial.println();
+        justWokeFromSleep = true;
+        break;
+      case ESP_SLEEP_WAKEUP_TOUCHPAD:
+        Serial.println();
+        Serial.println("  *** WOKE FROM DEEP SLEEP (TOUCHPAD) ***");
+        Serial.println();
+        justWokeFromSleep = true;
+        break;
+      case ESP_SLEEP_WAKEUP_EXT0:
+        Serial.println();
+        Serial.println("  *** WOKE FROM DEEP SLEEP (EXT0) ***");
+        Serial.println();
+        justWokeFromSleep = true;
+        break;
+      case ESP_SLEEP_WAKEUP_EXT1:
+        Serial.println();
+        Serial.println("  *** WOKE FROM DEEP SLEEP (EXT1) ***");
+        Serial.println();
+        justWokeFromSleep = true;
+        break;
+      case ESP_SLEEP_WAKEUP_COCPU:
+        Serial.println();
+        Serial.println("  *** WOKE FROM DEEP SLEEP (COCPU) ***");
+        Serial.println();
+        justWokeFromSleep = true;
+        break;
+      default:
+        // Normal boot, not a wake-up
+        justWokeFromSleep = false;
+        break;
+    }
+  #endif
+
   // Load device name from filesystem
   loadDeviceName();
+
+  // Load deep sleep configuration
+  loadDeepSleepConfig();
 
   chipId = generateChipId();
   updateTopicBase();
@@ -762,6 +1094,7 @@ void setup() {
 #endif
   mqttClient.setKeepAlive(30);
   mqttClient.setSocketTimeout(5);  // Reduced from 15s to minimize blocking during connection issues
+  mqttClient.setCallback(mqttCallback);
 
   // Start up the DS18B20 library
   sensors.begin();
@@ -779,9 +1112,63 @@ void setup() {
   // Connect to WiFi
   setupWiFi();
 
-  // Setup OTA updates (after WiFi is connected)
+  // Setup OTA updates (after WiFi is connected) - always available regardless of deep sleep config
+  // OTA will only listen when deepSleepSeconds == 0 (see loop())
   if (WiFi.status() == WL_CONNECTED) {
     setupOTA();
+  }
+
+  // If deep sleep is enabled, publish immediately and wait for MQTT commands
+  if (deepSleepSeconds > 0) {
+    Serial.println("[DEEP SLEEP] Deep sleep mode enabled - publishing and waiting for commands");
+
+    // Ensure MQTT is connected before publishing
+    if (!ensureMqttConnected()) {
+      Serial.println("[DEEP SLEEP] MQTT connection failed - staying awake to retry");
+      lastPublishTime = millis();
+      return;
+    }
+
+    // Read temperature before publishing
+    updateTemperatures();
+
+    // Publish immediately
+    bool publishSuccess = publishTemperature();
+    publishStatus();
+
+    Serial.println();
+    Serial.println("========================================");
+    Serial.println("     Setup Complete (Deep Sleep Mode)");
+    Serial.println("========================================");
+    Serial.println();
+
+    // Wait briefly to process any incoming MQTT commands (e.g., to disable deep sleep or OTA)
+    Serial.println("[DEEP SLEEP] Waiting 5 seconds for MQTT commands...");
+    unsigned long commandWaitStart = millis();
+    while (millis() - commandWaitStart < 5000) {
+      // Check if MQTT connection is still active before processing
+      if (!mqttClient.connected()) {
+        Serial.println("[DEEP SLEEP] MQTT disconnected during command wait window");
+        break;
+      }
+      mqttClient.loop();  // Process incoming MQTT messages
+      if (deepSleepSeconds == 0) {
+        ArduinoOTA.handle();
+      }
+      delay(10);
+    }
+
+    // Enter deep sleep only if it's still enabled (user may have disabled it via MQTT)
+    if (deepSleepSeconds > 0 && publishSuccess) {
+      enterDeepSleepIfEnabled();
+      // If we reach here, deep sleep failed or was aborted
+    } else if (deepSleepSeconds == 0) {
+      Serial.println("[DEEP SLEEP] Disabled via MQTT - continuing normal operation");
+    } else {
+      Serial.println("[DEEP SLEEP] Initial publish failed - staying awake to retry");
+    }
+    lastPublishTime = millis();
+    // Fall through to setup web server and continue
   }
 
   // Setup web server (only if enabled)
@@ -814,13 +1201,14 @@ void setup() {
 
 void loop() {
   // Must call drd->loop() to keep double reset detection working
-  drd->loop();
+  drd.loop();
 
   // Handle web requests first for responsiveness
   server.handleClient();
 
   // Process MQTT messages - detect connection loss early
-  if (!mqttClient.loop()) {
+  bool mqttLoopResult = mqttClient.loop();
+  if (!mqttLoopResult) {
     // loop() returns false if disconnected - log state change immediately
     int currentState = mqttClient.state();
     if (currentState != lastMqttState && lastMqttState == MQTT_CONNECTED) {
@@ -832,14 +1220,14 @@ void loop() {
 
   unsigned long now = millis();
 
-  // MQTT connection management - check health periodically (catches stale connections)
+  // MQTT connection management
   if ((now - lastMqttConnectionCheck) > MQTT_CONNECTION_CHECK_INTERVAL_MS) {
     lastMqttConnectionCheck = now;
-    ensureMqttConnected();  // This checks for stale connections even if "connected"
+    ensureMqttConnected();
   }
 
-  // Reconnect if disconnected, respecting backoff interval
-  if (!mqttClient.connected() && (now - lastMqttReconnectAttempt) >= mqttReconnectInterval) {
+  // Reconnect if disconnected
+  if (!mqttClient.connected() && (now - lastMqttReconnectAttempt) >= MQTT_RECONNECT_INTERVAL_MS) {
     ensureMqttConnected();
   }
 
@@ -892,8 +1280,13 @@ void loop() {
       // Check heap before operations
       uint32_t freeHeap = ESP.getFreeHeap();
       if (freeHeap < 8000) {
-        Serial.print("[WARNING] Low heap: ");
-        Serial.println(freeHeap);
+        Serial.printf("[WARNING] Low heap: %lu bytes\n", freeHeap);
+        // Force MQTT reconnection on critically low memory
+        if (freeHeap < 6000) {
+          Serial.println("[WARNING] Critical heap - reconnecting MQTT");
+          gracefulMqttDisconnect();
+          lastMqttReconnectAttempt = 0;  // Force immediate reconnect
+        }
       }
     #endif
     
@@ -902,21 +1295,30 @@ void loop() {
     if (rssi < WIFI_MIN_RSSI) {
       Serial.printf("[WARNING] Signal too weak (%d dBm), deferring MQTT publish\n", rssi);
       lastPublishTime = now;  // Reset timer to retry later
-      // Still call OTA.handle() before returning
-      ArduinoOTA.handle();
+      // Still call OTA.handle() if deep sleep disabled
+      if (deepSleepSeconds == 0) {
+        ArduinoOTA.handle();
+      }
       return;  // Skip this cycle
     }
     
     updateTemperatures();
     yield(); // Feed watchdog between operations
-    
+
     #ifdef BATTERY_MONITOR_ENABLED
       readBattery();
     #endif
-    
-    publishTemperature();
+
+    bool publishSuccess = publishTemperature();
     publishStatus();
     lastPublishTime = now;
+
+    // Only enter deep sleep if temperature was published successfully
+    if (publishSuccess) {
+      enterDeepSleepIfEnabled();
+    } else {
+      Serial.println("[DEEP SLEEP] Skipping deep sleep - publish failed, will retry");
+    }
   }
 
   // Periodic status heartbeat (helps diagnose connectivity)
@@ -927,14 +1329,13 @@ void loop() {
     bool mqttConnected = mqttClient.connected();
     int mqttState = mqttClient.state();
 
-    Serial.printf("[Status] WiFi:%s RSSI:%d IP:%s | MQTT:%s(%s) failures:%u backoff:%lus\n",
+    Serial.printf("[Status] WiFi:%s RSSI:%d IP:%s | MQTT:%s(%s) failures:%u\n",
                   wifiConnected ? "OK" : "DOWN",
                   rssi,
                   wifiConnected ? ip.toString().c_str() : "0.0.0.0",
                   mqttConnected ? "OK" : "DOWN",
                   getMqttStateString(mqttState),
-                  mqttConsecutiveFailures,
-                  mqttReconnectInterval / 1000);
+                  metrics.mqttPublishFailures);
 
     // Log last successful publish age if having issues
     if (!mqttConnected && metrics.lastSuccessfulMqttPublish > 0) {
@@ -953,8 +1354,11 @@ void loop() {
     lastDisplayUpdate = millis();
   }
   
-  // Handle OTA updates (called frequently for responsive OTA)
-  ArduinoOTA.handle();
+  // Handle OTA updates (only when deep sleep is disabled)
+  // When deep sleep is enabled, device sleeps and OTA is unavailable
+  if (deepSleepSeconds == 0) {
+    ArduinoOTA.handle();
+  }
   
   yield(); // Feed watchdog at end of loop
 }

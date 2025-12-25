@@ -44,8 +44,10 @@ static const unsigned long TEMPERATURE_READ_INTERVAL_MS = 30000;  // Read temper
 // Enable battery power profile (disables HTTP server, gates OLED)
 #define BATTERY_POWERED
 
-// Headless battery node: disable OLED hardware (stubs will no-op)
-#define OLED_ENABLED 0
+// OLED display: enabled via build flag for specific devices (default disabled for battery saving)
+#ifndef OLED_ENABLED
+  #define OLED_ENABLED 0
+#endif
 
 // Enable HTTP API endpoints (JSON only, no HTML dashboard) for remote battery monitoring
 #define API_ENDPOINTS_ONLY
@@ -54,7 +56,7 @@ static const unsigned long TEMPERATURE_READ_INTERVAL_MS = 30000;  // Read temper
   #ifdef ESP32
     static const int BATTERY_PIN = 34;           // ADC pin for battery voltage
     static const float VOLTAGE_DIVIDER = 2.0;    // Voltage divider ratio (R1/(R1+R2))
-    static const float CALIBRATION = 1.098;      // Calibration factor based on actual measurements
+    static const float CALIBRATION = 1.134;      // Calibration factor based on actual measurements
     static const float ADC_MAX = 4095.0;         // 12-bit ADC
     static const float REF_VOLTAGE = 3.3;        // ESP32 reference voltage
     static const float BATTERY_MIN_V = 3.0;      // 0% battery voltage
