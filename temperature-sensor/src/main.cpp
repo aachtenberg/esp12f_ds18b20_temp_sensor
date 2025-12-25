@@ -1151,15 +1151,17 @@ void setup() {
       delay(10);
     }
 
-    // Enter deep sleep immediately if publish succeeded
-    if (publishSuccess) {
+    // Enter deep sleep only if it's still enabled (user may have disabled it via MQTT)
+    if (deepSleepSeconds > 0 && publishSuccess) {
       enterDeepSleepIfEnabled();
+      // If we reach here, deep sleep failed or was aborted
+    } else if (deepSleepSeconds == 0) {
+      Serial.println("[DEEP SLEEP] Disabled via MQTT - continuing normal operation");
     } else {
       Serial.println("[DEEP SLEEP] Initial publish failed - staying awake to retry");
     }
-    // If we reach here, publish failed and we'll retry in loop()
     lastPublishTime = millis();
-    return;
+    // Fall through to setup web server and continue
   }
 
   // Setup web server (only if enabled)

@@ -31,6 +31,8 @@
 - Skip reading memory-bank context files
 - **Copy secrets.h.example to secrets.h without checking if secrets.h already exists**
 - **Overwrite existing secrets with example values**
+- **Hardcode OTA passwords or credentials in platformio.ini build/upload flags**
+- **Use `${sysenv.VAR}` syntax in platformio.ini - it doesn't work reliably with .env files**
 
 ### ✅ DO:
 - Read documentation thoroughly before suggesting changes
@@ -41,6 +43,8 @@
 - **Always check if `secrets.h` exists before suggesting to copy from `secrets.h.example`**
 - **Preserve existing secrets.h values when updating credentials**
 - **Only use `secrets.h.example` as a template for new projects or missing files**
+- **Use environment variable exports for OTA uploads: `export PLATFORMIO_UPLOAD_FLAGS="--auth=password" && pio run -t upload`**
+- **Keep platformio.ini clean - no hardcoded credentials or upload flags**
 
 ---
 
@@ -396,6 +400,69 @@ Set-NetFirewallProfile -Profile Private -Enabled True
 **Issue Discovered**: December 2025  
 **Platforms Affected**: WSL2 on Windows 10/11  
 **Status**: Documented, workaround available
+
+---
+
+## PlatformIO Configuration Best Practices (December 2025)
+
+**CRITICAL: Never hardcode credentials or authentication in platformio.ini**
+
+### ❌ WRONG - Do NOT Do This:
+```ini
+[env:esp32dev]
+upload_protocol = espota
+upload_flags =
+    --auth=hardcoded_password  # NEVER hardcode credentials!
+    --port=3232
+```
+
+### ✅ CORRECT - Use Environment Variables:
+```bash
+# Export OTA password before upload command
+export PLATFORMIO_UPLOAD_FLAGS="--auth=your_password" && pio run -e esp32dev -t upload --upload-port 192.168.0.x
+```
+
+### Why This Approach?
+1. **Security**: Credentials not committed to git
+2. **Flexibility**: Different passwords per developer/device
+3. **Safety**: No accidental credential exposure in diffs/logs
+4. **Simplicity**: Works reliably without .env file parsing issues
+
+### platformio.ini Configuration
+Keep upload configuration minimal and credential-free:
+```ini
+[env:esp32dev]
+platform = espressif32
+board = esp32dev
+framework = arduino
+monitor_speed = 115200
+upload_speed = 115200
+upload_protocol = espota
+; upload_port and upload_flags configured via environment variables
+; Use: export PLATFORMIO_UPLOAD_FLAGS="--auth=password" && pio run -t upload --upload-port IP
+```
+
+### Common Mistakes to Avoid
+1. **Using `${sysenv.VAR}` in platformio.ini**: Doesn't work reliably with .env files
+2. **Hardcoding `upload_flags` in platformio.ini**: Creates security risks
+3. **Committing credentials to version control**: Major security violation
+4. **Assuming .env file location**: PlatformIO .env handling is inconsistent
+
+### Deployment Scripts
+Create helper scripts in `scripts/` that handle authentication:
+```bash
+#!/bin/bash
+# scripts/deploy-ota.sh
+DEVICE_NAME=$1
+DEVICE_IP=$2
+OTA_PASSWORD=${OTA_PASSWORD:-"default_password"}
+
+export PLATFORMIO_UPLOAD_FLAGS="--auth=$OTA_PASSWORD"
+pio run -e esp32dev -t upload --upload-port $DEVICE_IP
+```
+
+**Issue Identified**: December 24, 2025  
+**Status**: Best practices documented, enforcement via copilot-instructions.md
 
 ---
 
