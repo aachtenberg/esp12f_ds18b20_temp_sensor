@@ -9,7 +9,7 @@
 - **Pump House**: 192.168.0.122 (ESP8266, mains-powered, chip: D8F15B0E72A5) - v1.0.9
 - **Main Cottage**: 192.168.0.139 (ESP8266, mains-powered, chip: CC50E3F38243) - v1.0.9
 - **Mobile Temp Sensor**: 192.168.0.213 (ESP8266, mains-powered, chip: 60019455E004) - v1.0.9
-- **Battery Display Test**: 192.168.0.112 (ESP32, battery-powered with OLED, chip: TBD) - v1.0.10
+- **Battery Display Test**: 192.168.0.112 (ESP32, battery-powered with OLED, chip: TBD) - v1.0.11 ✅ OTA deployed 2025-12-28
 
 ### OTA Password
 - Defined in `temperature-sensor/include/secrets.h`
