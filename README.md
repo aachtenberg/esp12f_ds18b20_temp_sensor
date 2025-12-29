@@ -202,6 +202,15 @@ D2 (GPIO 4) → SDA         GPIO 21 → SDA
 GND → GND                 GND → GND
 ```
 
+**Battery Voltage Sensing (ESP32 only):**
+```
+Battery+ → 10kΩ → GPIO34 → 10kΩ → GND  (2:1 voltage divider)
+
+Notes:
+- Keep grounds common; divider targets 4.2V Li-Ion down to safe ADC range.
+- Firmware already reads GPIO34 when running on ESP32; no extra config needed.
+```
+
 ### Features
 
 - **Deep Sleep Mode** (ESP32 only) - Battery-optimized with RTC timer wake cycles, MQTT remote configuration

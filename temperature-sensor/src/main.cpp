@@ -16,6 +16,21 @@
 #endif
 
 #include <WiFiManager.h>
+
+// DRD storage configuration - MUST be defined BEFORE including ESP_DoubleResetDetector.h
+#ifdef ESP32
+  #define ESP_DRD_USE_SPIFFS    true
+  #define ESP_DRD_USE_EEPROM    false
+  #define ESP_DRD_USE_LITTLEFS  false
+#else
+  #define ESP_DRD_USE_LITTLEFS  true
+  #define ESP_DRD_USE_EEPROM    false
+  #define ESP_DRD_USE_SPIFFS    false
+  #define ESP8266_DRD_USE_RTC   false
+#endif
+
+#define DOUBLERESETDETECTOR_DEBUG  true  // Enable debug output
+
 #include <ESP_DoubleResetDetector.h>
 #include <ArduinoOTA.h>
 #include <OneWire.h>
@@ -29,16 +44,15 @@
 #endif
 #include "secrets.h"
 #include "device_config.h"
-#include "trace.h"
 #include "display.h"
 #include "version.h"
 
 // Double Reset Detector configuration
-#define DRD_TIMEOUT 3           // Seconds to wait for second reset
+#define DRD_TIMEOUT 10          // Seconds to wait for second reset
 #define DRD_ADDRESS 0           // RTC memory address (ESP8266) or EEPROM address (ESP32)
 
-// Create Double Reset Detector instance (stack allocation, no memory leak)
-DoubleResetDetector drd(DRD_TIMEOUT, DRD_ADDRESS);
+// Create Double Reset Detector instance (initialized after filesystem mount)
+DoubleResetDetector* drd = nullptr;
 
 // Device name storage
 char deviceName[40] = "Temp Sensor";  // Default name
@@ -77,9 +91,6 @@ DeviceMetrics metrics;
 int deepSleepSeconds = 0;  // Default disabled
 volatile bool otaInProgress = false;  // Tracks active OTA upload to prevent sleep during transfer
 const char* DEEP_SLEEP_FILE = "/deep_sleep_seconds.txt";
-
-// Track if we just woke from deep sleep to prevent immediate re-sleep
-bool justWokeFromSleep = false;
 
 // Data wire is connected to GPIO 4
 OneWire oneWire(ONE_WIRE_PIN);
@@ -265,8 +276,6 @@ void readBattery() {
   
   metrics.batteryVoltage = voltage;
   metrics.batteryPercent = (int)percent;
-  
-  Serial.printf("[Battery] %.2fV, %d%%\n", voltage, (int)percent);
 #endif
 }
 
@@ -505,9 +514,6 @@ void publishEvent(const String& eventType, const String& message, const String& 
   doc["device"] = deviceName;
   doc["chip_id"] = chipId;
   doc["firmware_version"] = getFirmwareVersion();
-  doc["trace_id"] = Trace::getTraceId();
-  doc["traceparent"] = Trace::getTraceparent();
-  doc["seq_num"] = Trace::getSequenceNumber();
   doc["schema_version"] = 1;
   doc["event"] = eventType;
   doc["severity"] = severity;
@@ -528,15 +534,12 @@ bool publishTemperature() {
   StaticJsonDocument<256> doc;
   doc["device"] = deviceName;
   doc["chip_id"] = chipId;
-  doc["trace_id"] = Trace::getTraceId();
-  doc["traceparent"] = Trace::getTraceparent();
   #ifdef BATTERY_MONITOR_ENABLED
     if (metrics.batteryPercent >= 0) {
       doc["battery_voltage"] = metrics.batteryVoltage;
       doc["battery_percent"] = metrics.batteryPercent;
     }
   #endif
-  doc["seq_num"] = Trace::getSequenceNumber();
   doc["schema_version"] = 1;
   doc["timestamp"] = millis() / 1000;
   doc["celsius"] = temperatureC.toFloat();
@@ -549,9 +552,6 @@ void publishStatus() {
   doc["device"] = deviceName;
   doc["chip_id"] = chipId;
   doc["firmware_version"] = getFirmwareVersion();
-  doc["trace_id"] = Trace::getTraceId();
-  doc["traceparent"] = Trace::getTraceparent();
-  doc["seq_num"] = Trace::getSequenceNumber();
   doc["schema_version"] = 1;
   doc["timestamp"] = millis() / 1000;
   doc["uptime_seconds"] = (millis() - metrics.bootTime) / 1000;
@@ -751,7 +751,7 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
           Serial.printf("[WARNING] Deep sleep interval %ds is very short - WiFi overhead may drain battery\n", newSeconds);
           publishEvent("deep_sleep_warning", "Sleep interval < 10s causes excessive WiFi overhead", "warning");
         }
-        // Warn if OTA is active
+        // Warn if OTA is 
         if (otaInProgress) {
           Serial.println("[WARNING] OTA upload in progress - ignoring deep sleep change");
           publishEvent("ota_warning", "Ignored deep sleep change during active OTA upload", "warning");
@@ -775,14 +775,64 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
       publishEvent("device_restart", "Restarting device via MQTT command", "warning");
       delay(500);
       ESP.restart();
+    } else if (strcmp(payloadStr, "config") == 0 || strcmp(payloadStr, "portal") == 0) {
+      publishEvent("config_portal", "Starting WiFi configuration portal via MQTT command", "warning");
+      delay(500);
+
+      // Start WiFi configuration portal
+      WiFiManager wm;
+      String apName = String(deviceName);
+      apName.replace(" ", "-");
+      apName = "Temp-" + apName + "-Setup";
+
+      Serial.println();
+      Serial.println("========================================");
+      Serial.println("  MQTT CONFIG PORTAL REQUEST");
+      Serial.println("  Starting WiFi Configuration Portal");
+      Serial.println("========================================");
+      Serial.println();
+      Serial.println("[WiFi] Connect to AP: " + apName);
+      Serial.println("[WiFi] Then open http://192.168.4.1 in browser");
+      Serial.println();
+
+      WiFiManagerParameter custom_device_name("device_name", "Device Name", deviceName, 40);
+      wm.addParameter(&custom_device_name);
+      wm.setConfigPortalTimeout(300); // 5 minute timeout
+
+      bool shouldSaveConfig = false;
+      wm.setSaveConfigCallback([&shouldSaveConfig](){
+        shouldSaveConfig = true;
+      });
+
+      if (wm.startConfigPortal(apName.c_str())) {
+        drd->stop();  // Clear double-reset flag after successful config
+        if (shouldSaveConfig) {
+          const char* newName = custom_device_name.getValue();
+          String oldName = String(deviceName);
+          strcpy(deviceName, newName);
+          updateTopicBase();
+          saveDeviceName(deviceName);
+
+          if (oldName != String(newName)) {
+            publishEvent("device_configured", "Name: '" + oldName + "' -> '" + String(newName) + "', SSID: " + WiFi.SSID() + ", IP: " + WiFi.localIP().toString(), "info");
+          } else {
+            publishEvent("device_configured", "WiFi reconfigured - SSID: " + WiFi.SSID() + ", IP: " + WiFi.localIP().toString(), "info");
+          }
+        }
+        Serial.println("[WiFi] Configuration portal completed successfully");
+      } else {
+        Serial.println("[WiFi] Configuration portal timeout or cancelled");
+        publishEvent("config_portal", "Configuration portal closed (timeout or cancel)", "warning");
+      }
     }
   }
 }
 
 void setupWebServer() {
-#ifndef API_ENDPOINTS_ONLY
-  server.on("/", HTTP_GET, handleRoot);
-#endif
+#if HTTP_SERVER_ENABLED
+  #ifndef API_ENDPOINTS_ONLY
+    server.on("/", HTTP_GET, handleRoot);
+  #endif
   server.on("/temperaturec", HTTP_GET, handleTemperatureC);
   server.on("/temperaturef", HTTP_GET, handleTemperatureF);
   server.on("/health", HTTP_GET, handleHealth);
@@ -790,6 +840,9 @@ void setupWebServer() {
   server.on("/deepsleep", HTTP_POST, handleDeepSleepPost);
   server.begin();
   Serial.println("[HTTP] Web server started on port 80");
+#else
+  Serial.println("[HTTP] Web server disabled (battery mode)");
+#endif
 }
 
 void setupWiFi() {
@@ -815,61 +868,9 @@ void setupWiFi() {
     WiFi.setAutoReconnect(true);
   #endif
 
-  // Check for double reset - always enter config portal if detected
-  if (drd.detectDoubleReset()) {
-    Serial.println();
-    Serial.println("========================================");
-    Serial.println("  DOUBLE RESET DETECTED");
-    Serial.println("  Starting WiFi Configuration Portal");
-    Serial.println("========================================");
-    Serial.println();
-
-    WiFiManager wm;
-    String apName = String(deviceName);
-    apName.replace(" ", "-");
-    apName = "Temp-" + apName + "-Setup";
-
-    Serial.println("[WiFi] Connect to AP: " + apName);
-    Serial.println("[WiFi] Then open http://192.168.4.1 in browser");
-    Serial.println();
-
-    WiFiManagerParameter custom_device_name("device_name", "Device Name", deviceName, 40);
-    wm.addParameter(&custom_device_name);
-    wm.setConnectTimeout(0);
-
-    bool shouldSaveConfig = false;
-    wm.setSaveConfigCallback([&shouldSaveConfig](){
-      Serial.println("[Config] Configuration saved, will update device name...");
-      shouldSaveConfig = true;
-    });
-
-    if (!wm.startConfigPortal(apName.c_str())) {
-      Serial.println("[WiFi] Failed to connect after config portal");
-      Serial.println("[WiFi] Restarting...");
-      delay(3000);
-      ESP.restart();
-    } else {
-      if (shouldSaveConfig) {
-        const char* newName = custom_device_name.getValue();
-        Serial.print("[Config] New device name: ");
-        Serial.println(newName);
-        String oldName = String(deviceName);
-        strcpy(deviceName, newName);
-        updateTopicBase();
-        saveDeviceName(deviceName);
-
-        if (oldName != String(newName)) {
-          publishEvent("device_configured", "Name: '" + oldName + "' -> '" + String(newName) + "', SSID: " + WiFi.SSID() + ", IP: " + WiFi.localIP().toString(), "info");
-        } else {
-          publishEvent("device_configured", "WiFi reconfigured - SSID: " + WiFi.SSID() + ", IP: " + WiFi.localIP().toString() + ", Name unchanged: " + oldName, "info");
-        }
-      }
-    }
-    return;  // Exit early after portal configuration
-  }
-
+  // Double-reset check now happens early in setup() before this function is called
   // Normal boot: attempt WiFi connection with retry logic
-  Serial.println("[WiFi] Normal boot - attempting connection...");
+  Serial.println("[WiFi] Attempting connection...");
 
   // Check if we have saved credentials
   if (WiFi.SSID().length() == 0) {
@@ -898,11 +899,14 @@ void setupWiFi() {
       shouldSaveConfig = true;
     });
 
-    if (wm.autoConnect(apName.c_str()) && shouldSaveConfig) {
-      const char* newName = custom_device_name.getValue();
-      strcpy(deviceName, newName);
-      updateTopicBase();
-      saveDeviceName(deviceName);
+    if (wm.autoConnect(apName.c_str())) {
+      drd->stop();  // Clear double-reset flag after successful connection
+      if (shouldSaveConfig) {
+        const char* newName = custom_device_name.getValue();
+        strcpy(deviceName, newName);
+        updateTopicBase();
+        saveDeviceName(deviceName);
+      }
     }
     return;
   }
@@ -991,22 +995,83 @@ void setup() {
   // Initialize metrics
   metrics.bootTime = millis();
 
-  // Initialize trace instrumentation
-  Trace::init();
-
   // Serial port for debugging
   Serial.begin(115200);
   delay(1000);
 
-  // Set CPU frequency to low-power mode
-  #ifdef ESP8266
-    system_update_cpu_freq(CPU_FREQ_MHZ);
-  #else
-    setCpuFrequencyMhz(CPU_FREQ_MHZ);
-  #endif
-  Serial.print("[POWER] CPU frequency set to ");
-  Serial.print(CPU_FREQ_MHZ);
-  Serial.println(" MHz");
+  // Mount filesystem FIRST - required for DoubleResetDetector and config files
+#ifdef ESP32
+  if (!SPIFFS.begin(true)) {
+    Serial.println("[FS] CRITICAL: Failed to mount SPIFFS");
+  } else {
+    Serial.println("[FS] SPIFFS mounted successfully");
+  }
+#else
+  if (!LittleFS.begin()) {
+    Serial.println("[FS] CRITICAL: Failed to mount LittleFS");
+  } else {
+    Serial.println("[FS] LittleFS mounted successfully");
+  }
+#endif
+
+  // CPU runs at full speed - power savings handled by deep sleep instead
+  // Reducing CPU frequency can cause timing issues and slow OTA transfers
+  Serial.println("[POWER] CPU running at full speed - using deep sleep for power management");
+
+  // Initialize Double Reset Detector (after filesystem mount)
+  drd = new DoubleResetDetector(DRD_TIMEOUT, DRD_ADDRESS);
+  Serial.println("[DRD] Double Reset Detector initialized");
+
+  // Check for double reset IMMEDIATELY (before slow WiFi/MQTT setup)
+  // This must happen within the DRD timeout window
+  if (drd->detectDoubleReset()) {
+    Serial.println();
+    Serial.println("========================================");
+    Serial.println("  DOUBLE RESET DETECTED");
+    Serial.println("  Starting WiFi Configuration Portal");
+    Serial.println("========================================");
+    Serial.println();
+
+    // Load device name first (needed for AP name)
+    loadDeviceName();
+
+    WiFiManager wm;
+    String apName = String(deviceName);
+    apName.replace(" ", "-");
+    apName = "Temp-" + apName + "-Setup";
+
+    Serial.println("[WiFi] Connect to AP: " + apName);
+    Serial.println("[WiFi] Then open http://192.168.4.1 in browser");
+    Serial.println();
+
+    WiFiManagerParameter custom_device_name("device_name", "Device Name", deviceName, 40);
+    wm.addParameter(&custom_device_name);
+    wm.setConfigPortalTimeout(300); // 5 minute timeout
+
+    bool shouldSaveConfig = false;
+    wm.setSaveConfigCallback([&shouldSaveConfig](){
+      shouldSaveConfig = true;
+    });
+
+    if (wm.startConfigPortal(apName.c_str())) {
+      drd->stop();  // Clear double-reset flag after successful config
+      if (shouldSaveConfig) {
+        const char* newName = custom_device_name.getValue();
+        strcpy(deviceName, newName);
+        saveDeviceName(deviceName);
+        Serial.print("[Config] Device name updated: ");
+        Serial.println(newName);
+      }
+      Serial.println("[WiFi] Configuration portal completed successfully");
+      Serial.println("[WiFi] Restarting to apply new configuration...");
+      delay(1000);
+      ESP.restart();
+    } else {
+      Serial.println("[WiFi] Configuration portal timeout or cancelled");
+      Serial.println("[WiFi] Continuing with existing configuration...");
+      drd->stop();  // Clear flag even if portal was cancelled
+    }
+  }
 
   // Print reset reason for diagnostics
   #ifdef ESP8266
@@ -1025,64 +1090,51 @@ void setup() {
   Serial.println("========================================");
   Serial.println();
 
-  // Detect wake from deep sleep
-  #ifdef ESP32
-    esp_sleep_wakeup_cause_t wakeupCause = esp_sleep_get_wakeup_cause();
-    switch (wakeupCause) {
-      case ESP_SLEEP_WAKEUP_TIMER:
-        Serial.println();
-        Serial.println("  *** WOKE FROM DEEP SLEEP (TIMER) ***");
-        Serial.println();
-        justWokeFromSleep = true;
-        break;
-      case ESP_SLEEP_WAKEUP_GPIO:
-        Serial.println();
-        Serial.println("  *** WOKE FROM DEEP SLEEP (GPIO) ***");
-        Serial.println();
-        justWokeFromSleep = true;
-        break;
-      case ESP_SLEEP_WAKEUP_UART:
-        Serial.println();
-        Serial.println("  *** WOKE FROM DEEP SLEEP (UART) ***");
-        Serial.println();
-        justWokeFromSleep = true;
-        break;
-      case ESP_SLEEP_WAKEUP_TOUCHPAD:
-        Serial.println();
-        Serial.println("  *** WOKE FROM DEEP SLEEP (TOUCHPAD) ***");
-        Serial.println();
-        justWokeFromSleep = true;
-        break;
-      case ESP_SLEEP_WAKEUP_EXT0:
-        Serial.println();
-        Serial.println("  *** WOKE FROM DEEP SLEEP (EXT0) ***");
-        Serial.println();
-        justWokeFromSleep = true;
-        break;
-      case ESP_SLEEP_WAKEUP_EXT1:
-        Serial.println();
-        Serial.println("  *** WOKE FROM DEEP SLEEP (EXT1) ***");
-        Serial.println();
-        justWokeFromSleep = true;
-        break;
-      case ESP_SLEEP_WAKEUP_COCPU:
-        Serial.println();
-        Serial.println("  *** WOKE FROM DEEP SLEEP (COCPU) ***");
-        Serial.println();
-        justWokeFromSleep = true;
-        break;
-      default:
-        // Normal boot, not a wake-up
-        justWokeFromSleep = false;
-        break;
-    }
-  #endif
-
   // Load device name from filesystem
   loadDeviceName();
 
   // Load deep sleep configuration
   loadDeepSleepConfig();
+
+  // Check if this was a wake from deep sleep or a manual reset
+  #ifdef ESP32
+    esp_sleep_wakeup_cause_t wakeupCause = esp_sleep_get_wakeup_cause();
+    if (wakeupCause == ESP_SLEEP_WAKEUP_TIMER) {
+      Serial.println();
+      Serial.println("  *** WOKE FROM DEEP SLEEP (TIMER) ***");
+      Serial.println();
+    } else if (deepSleepSeconds > 0) {
+      // Manual reset detected - disable deep sleep to allow user interaction
+      Serial.println();
+      Serial.println("========================================");
+      Serial.println("  MANUAL RESET DETECTED");
+      Serial.println("  Deep sleep DISABLED for this session");
+      Serial.println("  Re-enable via MQTT if needed");
+      Serial.println("========================================");
+      Serial.println();
+      deepSleepSeconds = 0;
+      saveDeepSleepConfig();
+    }
+  #else
+    // ESP8266: Check if reset reason indicates deep sleep wake
+    String resetReason = ESP.getResetReason();
+    if (resetReason == "Deep-Sleep Wake") {
+      Serial.println();
+      Serial.println("  *** WOKE FROM DEEP SLEEP ***");
+      Serial.println();
+    } else if (deepSleepSeconds > 0) {
+      // Manual reset detected - disable deep sleep
+      Serial.println();
+      Serial.println("========================================");
+      Serial.println("  MANUAL RESET DETECTED");
+      Serial.println("  Deep sleep DISABLED for this session");
+      Serial.println("  Re-enable via MQTT if needed");
+      Serial.println("========================================");
+      Serial.println();
+      deepSleepSeconds = 0;
+      saveDeepSleepConfig();
+    }
+  #endif
 
   chipId = generateChipId();
   updateTopicBase();
@@ -1179,13 +1231,12 @@ void setup() {
   #endif
 
       // Log device boot/reset event
-      String resetReason;
       #ifdef ESP8266
-        resetReason = ESP.getResetReason();
+        String bootResetReason = ESP.getResetReason();
       #else
-        resetReason = String(esp_reset_reason());
+        String bootResetReason = String(esp_reset_reason());
       #endif
-      publishEvent("device_boot", "Device started - Reset reason: " + resetReason + ", Uptime: 0s, Free heap: " + String(ESP.getFreeHeap()) + " bytes", "info");
+      publishEvent("device_boot", "Device started - Reset reason: " + bootResetReason + ", Uptime: 0s, Free heap: " + String(ESP.getFreeHeap()) + " bytes", "info");
 
       // Publish initial readings/status immediately
       publishTemperature();
@@ -1201,10 +1252,12 @@ void setup() {
 
 void loop() {
   // Must call drd->loop() to keep double reset detection working
-  drd.loop();
+  drd->loop();
 
   // Handle web requests first for responsiveness
-  server.handleClient();
+  #if HTTP_SERVER_ENABLED
+    server.handleClient();
+  #endif
 
   // Process MQTT messages - detect connection loss early
   bool mqttLoopResult = mqttClient.loop();
@@ -1350,7 +1403,7 @@ void loop() {
   if (millis() - lastDisplayUpdate >= 1000) {
     bool wifiConnected = (WiFi.status() == WL_CONNECTED);
     String ipStr = wifiConnected ? WiFi.localIP().toString() : "";
-    updateDisplay(temperatureC.c_str(), temperatureF.c_str(), wifiConnected, ipStr.c_str());
+    updateDisplay(temperatureC.c_str(), temperatureF.c_str(), wifiConnected, ipStr.c_str(), metrics.batteryPercent);
     lastDisplayUpdate = millis();
   }
   

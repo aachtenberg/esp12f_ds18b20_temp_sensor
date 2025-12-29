@@ -101,7 +101,17 @@ bool isDisplayOnWindow() {
 // DISPLAY UPDATE
 // =============================================================================
 
-void updateDisplay(const char* tempC, const char* tempF, bool wifiConnected, const char* ipAddress) {
+void updateDisplay(const char* tempC, const char* tempF, bool wifiConnected, const char* ipAddress, int batteryPercent) {
+    // Check battery level - disable display if battery powered and below 50%
+    #ifdef BATTERY_POWERED
+    if (batteryPercent >= 0 && batteryPercent < 50) {
+        display.setPowerSave(1);  // Power off display to save battery
+        return;
+    } else if (batteryPercent >= 50) {
+        display.setPowerSave(0);  // Power on display when battery recovers
+    }
+    #endif
+    
     // Check gating window
     if (!isDisplayOnWindow()) {
         return;  // Skip update if outside display window

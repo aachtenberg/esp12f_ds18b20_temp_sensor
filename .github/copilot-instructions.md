@@ -45,6 +45,7 @@
 - **Only use `secrets.h.example` as a template for new projects or missing files**
 - **Use environment variable exports for OTA uploads: `export PLATFORMIO_UPLOAD_FLAGS="--auth=password" && pio run -t upload`**
 - **Keep platformio.ini clean - no hardcoded credentials or upload flags**
+- **ALWAYS bump firmware version before building/deploying: `cd temperature-sensor && ./update_version.sh --patch`**
 
 ---
 
@@ -575,9 +576,29 @@ pio run -e esp32dev -t upload
 **Status**: Active, required for all new builds
 
 
-### Surveillance-arduino project
-# use the Arduino project for all new work
-# read and build according to ARDUINO_CLI_SETUP.md instructions and BUILD_SYSTEMS.md instructions
+### Surveillance-arduino project - Arduino CLI Build
+
+**CRITICAL: Partition Table Alignment**
+
+The COMPILE_ESP32S3.sh script uses `--output-dir ESP32CAM_Surveillance/build` which generates the correct `huge_app` partition scheme:
+- App: 0x10000, 3MB
+- **SPIFFS/LittleFS: 0x310000, 896KB** (NOT 0x290000)
+
+**MUST follow this workflow:**
+1. Compile: `./COMPILE_ESP32S3.sh` (uses --output-dir, generates huge_app partitions)
+2. Upload firmware: `./bin/arduino-cli upload -p /dev/ttyACM0 --fqbn esp32:esp32:esp32s3:PSRAM=opi,PartitionScheme=huge_app,FlashMode=qio ESP32CAM_Surveillance`
+3. Upload LittleFS: `./UPLOAD_LITTLEFS.sh /dev/ttyACM0 s3` (uses 0x310000 address to match huge_app)
+4. Both uploads use MATCHING partition tables - DO NOT MIX
+
+**Why this matters:**
+- Without --output-dir: Arduino CLI uses default partition table (SPIFFS at 0x009000, only 20KB)
+- With --output-dir: Arduino CLI uses huge_app partition table (SPIFFS at 0x310000, 896KB)
+- UPLOAD_LITTLEFS.sh MUST use the same address as the compiled firmware
+
+For more details, see:
+- surveillance-arduino/ARDUINO_CLI_SETUP.md
+- surveillance-arduino/BUILD_SYSTEMS.md
+- surveillance-arduino/README.md
 
 ---
 

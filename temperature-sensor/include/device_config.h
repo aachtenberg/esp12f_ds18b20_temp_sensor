@@ -41,16 +41,21 @@ static const unsigned long TEMPERATURE_READ_INTERVAL_MS = 30000;  // Read temper
   #define BATTERY_MONITOR_ENABLED
 #endif
 
-// Enable battery power profile (disables HTTP server, gates OLED)
-#define BATTERY_POWERED
+// BATTERY_POWERED: Set via build flags in platformio.ini (per-device)
+#ifndef BATTERY_POWERED
+  #define BATTERY_POWERED 0
+#endif
 
 // OLED display: enabled via build flag for specific devices (default disabled for battery saving)
 #ifndef OLED_ENABLED
   #define OLED_ENABLED 0
 #endif
 
-// Enable HTTP API endpoints (JSON only, no HTML dashboard) for remote battery monitoring
-#define API_ENDPOINTS_ONLY
+// API_ENDPOINTS_ONLY: Set via build flags in platformio.ini (per-device)
+// When enabled, HTTP server provides only JSON endpoints (no HTML dashboard)
+#ifndef API_ENDPOINTS_ONLY
+  #define API_ENDPOINTS_ONLY 0
+#endif
 
 #ifdef BATTERY_MONITOR_ENABLED
   #ifdef ESP32
@@ -87,18 +92,18 @@ static const unsigned long TEMPERATURE_READ_INTERVAL_MS = 30000;  // Read temper
 // OLED Display Gating (1 = gate display, 0 = always on)
 // Battery-powered devices: gate to 10s on / 50s off per minute (saves ~60% OLED power)
 // Mains-powered devices: always on for monitoring
-#ifdef BATTERY_POWERED
+#if BATTERY_POWERED && !defined(OLED_ALWAYS_ON)
   #define OLED_GATE_ENABLED 1             // Gate OLED for battery operation
   #define OLED_ON_DURATION_MS 10000       // Display on for 10 seconds
   #define OLED_CYCLE_DURATION_MS 60000    // Full cycle is 60 seconds (on 10s, off 50s)
   #define HTTP_SERVER_ENABLED 0           // Disable HTTP server for battery
 #else
-  #define OLED_GATE_ENABLED 0             // Always on for mains-powered
+  #define OLED_GATE_ENABLED 0             // Always on for mains-powered or OLED_ALWAYS_ON
   #define HTTP_SERVER_ENABLED 1           // Enable HTTP server for mains-powered
 #endif
 
 // Override HTTP server for API-only mode (if requested)
-#ifdef API_ENDPOINTS_ONLY
+#if API_ENDPOINTS_ONLY
   #undef HTTP_SERVER_ENABLED
   #define HTTP_SERVER_ENABLED 1           // Enable HTTP for JSON endpoints only
 #endif
