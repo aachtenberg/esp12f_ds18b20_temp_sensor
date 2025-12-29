@@ -46,6 +46,7 @@
 - **Use environment variable exports for OTA uploads: `export PLATFORMIO_UPLOAD_FLAGS="--auth=password" && pio run -t upload`**
 - **Keep platformio.ini clean - no hardcoded credentials or upload flags**
 - **ALWAYS bump firmware version before building/deploying: `cd temperature-sensor && ./update_version.sh --patch`**
+- **After deploying firmware, update device inventory in `.claude/OTA_DEPLOYMENT_GUIDE.md` with device name, IP, chip ID, and version**
 
 ---
 
