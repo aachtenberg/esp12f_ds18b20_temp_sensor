@@ -27,6 +27,9 @@ static unsigned long lastDisplayOnTime = 0;  // Track when display was last turn
 static bool displayShouldBeOn = true;        // Track current state
 #endif
 
+// Track display power state to avoid unnecessary I2C traffic
+static bool displayIsPoweredOn = true;
+
 // =============================================================================
 // INITIALIZATION
 // =============================================================================
@@ -105,10 +108,16 @@ void updateDisplay(const char* tempC, const char* tempF, bool wifiConnected, con
     // Check battery level - disable display if battery powered and below 50%
     #ifdef BATTERY_POWERED
     if (batteryPercent >= 0 && batteryPercent < 50) {
-        display.setPowerSave(1);  // Power off display to save battery
+        if (displayIsPoweredOn) {
+            display.setPowerSave(1);  // Power off display to save battery
+            displayIsPoweredOn = false;
+        }
         return;
     } else if (batteryPercent >= 50) {
-        display.setPowerSave(0);  // Power on display when battery recovers
+        if (!displayIsPoweredOn) {
+            display.setPowerSave(0);  // Power on display when battery recovers
+            displayIsPoweredOn = true;
+        }
     }
     #endif
     

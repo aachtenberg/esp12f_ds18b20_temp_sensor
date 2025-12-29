@@ -125,6 +125,7 @@ bool cameraReady = false;
 bool mqttConnected = false;
 // OTA runtime state (enabled when OTA_PASSWORD is configured securely)
 bool otaEnabled = false;
+volatile bool otaInProgress = false;  // Track active OTA transfers
 
 // Metrics
 unsigned long captureCount = 0;
@@ -160,6 +161,7 @@ void setupMQTT();
 void setupOTA();
 void setupWebServer();
 void reconnectMQTT();
+void gracefulMqttDisconnect();
 void publishStatus();
 void captureAndPublish();
 void captureAndPublishWithImage();
@@ -222,6 +224,26 @@ void setup() {
         Serial.println("[SETUP] WARNING: LittleFS mount failed!");
     } else {
         Serial.println("[SETUP] LittleFS mounted successfully");
+        
+        // Debug: List files in root directory
+        File root = LittleFS.open("/");
+        if (root && root.isDirectory()) {
+            Serial.println("[SETUP] Files in LittleFS root:");
+            File file = root.openNextFile();
+            while (file) {
+                Serial.printf("  - %s (%d bytes)\n", file.name(), file.size());
+                file = root.openNextFile();
+            }
+        }
+        
+        // Check specifically for index.html.gz
+        if (LittleFS.exists("/index.html.gz")) {
+            File f = LittleFS.open("/index.html.gz", "r");
+            Serial.printf("[SETUP] /index.html.gz EXISTS - size: %d bytes\n", f.size());
+            f.close();
+        } else {
+            Serial.println("[SETUP] /index.html.gz NOT FOUND!");
+        }
     }
 
     // Load device name from filesystem
@@ -1471,9 +1493,28 @@ void setupOTA() {
             type = "filesystem";
         }
         Serial.println("[OTA] Starting update: " + type);
-        
-        // Log OTA start event to MQTT
+
+        // Set OTA in progress flag
+        otaInProgress = true;
+
+        // Log OTA start event to MQTT (before disconnecting)
         logEventToMQTT("ota_start", "info");
+
+        // CRITICAL: Stop all services before OTA to prevent crashes
+        Serial.println("[OTA] Stopping web server...");
+        server.end();
+
+        Serial.println("[OTA] Disconnecting MQTT gracefully...");
+        gracefulMqttDisconnect();
+
+        // Stop camera to free memory
+        Serial.println("[OTA] Deinitializing camera...");
+        if (cameraReady) {
+            esp_camera_deinit();
+            cameraReady = false;
+        }
+
+        Serial.println("[OTA] Services stopped, ready for update");
     });
 
     ArduinoOTA.onEnd([]() {
@@ -1505,7 +1546,10 @@ void setupOTA() {
         else if (error == OTA_RECEIVE_ERROR) errorMsg = "Receive Failed";
         else if (error == OTA_END_ERROR) errorMsg = "End Failed";
         Serial.println(errorMsg);
-        
+
+        // Clear OTA in progress flag on error
+        otaInProgress = false;
+
         // Log OTA error to MQTT
         logEventToMQTT("ota_error", "error");
     });
@@ -1844,6 +1888,30 @@ void reconnectMQTT() {
     }
 }
 
+void gracefulMqttDisconnect() {
+    if (!mqttConnected || !mqttClient.connected()) {
+        return;
+    }
+
+    Serial.println("[MQTT] Gracefully disconnecting...");
+
+    // Attempt clean disconnect with timeout
+    mqttClient.disconnect();
+
+    unsigned long disconnectStart = millis();
+    while (mqttClient.connected() && (millis() - disconnectStart) < 500) {
+        yield();  // Allow TCP stack to process
+    }
+
+    mqttConnected = false;
+
+    if (!mqttClient.connected()) {
+        Serial.println("[MQTT] Disconnected cleanly");
+    } else {
+        Serial.println("[MQTT] Disconnect timeout, forcing");
+    }
+}
+
 void publishStatus() {
     if (!mqttConnected) return;
 
@@ -2011,6 +2079,12 @@ void captureAndPublishWithImage() {
 }
 
 void mqttCallback(char* topic, byte* payload, unsigned int length) {
+    // Ignore MQTT commands during OTA to prevent conflicts
+    if (otaInProgress) {
+        Serial.println("[MQTT] Ignoring command during OTA");
+        return;
+    }
+
     Serial.printf("MQTT message received on topic: %s\n", topic);
 
     // Parse JSON command
@@ -2045,15 +2119,22 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
 
 void handleRoot(AsyncWebServerRequest *request) {
     // Try to serve gzipped HTML from LittleFS (6.7KB vs 27KB uncompressed)
-    if (littleFsReady && LittleFS.exists("/index.html.gz")) {
-        AsyncWebServerResponse *response = request->beginResponse(LittleFS, "/index.html.gz", "text/html");
-        response->addHeader("Content-Encoding", "gzip");
-        response->addHeader("Cache-Control", "no-cache, no-store, must-revalidate");
-        request->send(response);
-        return;
+    Serial.printf("[WEB] handleRoot called. littleFsReady=%d\n", littleFsReady);
+    if (littleFsReady) {
+        bool fileExists = LittleFS.exists("/index.html.gz");
+        Serial.printf("[WEB] /index.html.gz exists=%d\n", fileExists);
+        if (fileExists) {
+            Serial.println("[WEB] Serving from LittleFS");
+            AsyncWebServerResponse *response = request->beginResponse(LittleFS, "/index.html.gz", "text/html");
+            response->addHeader("Content-Encoding", "gzip");
+            response->addHeader("Cache-Control", "no-cache, no-store, must-revalidate");
+            request->send(response);
+            return;
+        }
     }
 
     // Fallback: embedded HTML if LittleFS file missing
+    Serial.println("[WEB] Using embedded HTML fallback");
     String html = R"=====(<!doctype html>
 <html>
 <head>

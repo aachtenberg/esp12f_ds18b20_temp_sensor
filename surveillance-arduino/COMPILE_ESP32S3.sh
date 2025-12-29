@@ -18,7 +18,7 @@ echo "   Camera: OV3660 (auto-detected)"
 echo ""
 
 ./bin/arduino-cli compile \
-  --fqbn esp32:esp32:esp32s3:PSRAM=opi,PartitionScheme=huge_app,FlashMode=qio \
+  --fqbn esp32:esp32:esp32s3:PSRAM=opi,PartitionScheme=huge_app,FlashMode=qio --output-dir ESP32CAM_Surveillance/build \
   ESP32CAM_Surveillance \
   --verify
 

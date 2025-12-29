@@ -116,7 +116,7 @@ while [[ $# -gt 0 ]]; do
             RETRY_INTERVAL="$2"
             shift 2
             ;;
-        deepsleep|disable-sleep|enable-sleep|status|restart|monitor)
+        deepsleep|disable-sleep|enable-sleep|status|restart|monitor|config)
             COMMAND="$1"
             shift
             # Collect remaining args (non-option arguments)
@@ -322,6 +322,13 @@ case "$COMMAND" in
         send_command "restart" \
                      "restart" \
                      "Device restarting" \
+                     "$EVENTS_TOPIC"
+        ;;
+        
+    config)
+        send_command "config" \
+                     "config" \
+                     "Device resetting WiFI" \
                      "$EVENTS_TOPIC"
         ;;
         

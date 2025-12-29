@@ -21,11 +21,11 @@ DATA_DIR="$SKETCH_DIR/data"
 MKLITTLEFS="$HOME/.arduino15/packages/esp32/tools/mklittlefs/4.0.2-db0513a/mklittlefs"
 ESPTOOL="$HOME/.arduino15/packages/esp32/tools/esptool_py/5.1.0/esptool"
 
-# Partition layout (huge_app scheme - same for both chips):
-# - App: 0x10000, size 3MB
-# - SPIFFS/LittleFS: 0x290000, size 0xF0000 (960KB)
-LITTLEFS_ADDR="0x290000"
-LITTLEFS_SIZE="0xF0000"  # 960KB
+# Partition layout (huge_app scheme):
+# - APP: 0x10000, size 3MB (3072KB)
+# - SPIFFS/LittleFS: 0x310000, size 0xE0000 (896KB)
+LITTLEFS_ADDR="0x310000"
+LITTLEFS_SIZE="0xE0000"  # 896KB
 
 # Normalize chip type
 case "$CHIP" in

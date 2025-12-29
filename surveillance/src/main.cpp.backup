@@ -9,9 +9,14 @@
 #include <base64.h>
 #include <LittleFS.h>
 #include <SD_MMC.h>
+#include <SD.h> // For SD card read/write utilities
 #include <Preferences.h>
 #include <esp_system.h>
+#include <driver/sdmmc_host.h>
+#include <sdmmc_cmd.h>
 #include <img_converters.h>
+#include <vector>
+#include <algorithm>
 #include "camera_config.h"
 #include "device_config.h"
 #include "secrets.h"
@@ -33,8 +38,6 @@ RTC_NOINIT_ATTR uint32_t rtcCrashCount;      // Consecutive crash count
 
 // Boot/recovery state
 const char* configPortalReason = "none";     // Why portal was triggered
-bool fallbackAPActive = false;                // Fallback AP is running
-unsigned long wifiDisconnectTime = 0;         // When WiFi first disconnected
 
 // Device name storage
 char deviceName[40] = "Surveillance Cam";
@@ -58,6 +61,9 @@ bool flashEnabled = true;   // Flash during captures (always ON, not configurabl
 bool flashMotionEnabled = false;  // Flash for motion indicator (default OFF - too bright for continuous use)
 bool flashManualOn = false;  // Manual flashlight mode (default OFF)
 
+// Filesystem status
+bool littleFsReady = false;
+
 // SD card capture storage
 bool sdReady = false;
 const char* SD_CAPTURE_DIR = "/captures";
@@ -80,6 +86,7 @@ unsigned long lastMotionCheck = 0;
 // Device state
 bool cameraReady = false;
 bool mqttConnected = false;
+volatile bool otaInProgress = false;  // Track active OTA transfers
 
 // Metrics
 unsigned long captureCount = 0;
@@ -110,6 +117,7 @@ void setupMQTT();
 void setupOTA();
 void setupWebServer();
 void reconnectMQTT();
+void gracefulMqttDisconnect();
 void publishStatus();
 void captureAndPublish();
 void captureAndPublishWithImage();
@@ -135,7 +143,6 @@ void handleWiFiReset(AsyncWebServerRequest *request);
 void handleMotionDetection();
 void checkResetCounter();
 void clearCrashLoop();
-void checkWiFiFallback();
 
 void setup() {
     Serial.begin(115200);
@@ -158,6 +165,15 @@ void setup() {
     Serial.println("[SETUP] Starting initialization...");
 
     // Removed: reset check now runs at the very start to ensure window timing works
+
+    // Initialize LittleFS once (used for config storage)
+    Serial.println("[SETUP] Mounting LittleFS...");
+    littleFsReady = LittleFS.begin(true);  // true = format if needed
+    if (!littleFsReady) {
+        Serial.println("[SETUP] WARNING: LittleFS mount failed!");
+    } else {
+        Serial.println("[SETUP] LittleFS mounted successfully");
+    }
 
     // Load device name from filesystem
     Serial.println("[SETUP] Loading device name...");
@@ -190,6 +206,9 @@ void setup() {
         Serial.println("[SETUP] No flash LED available on this board");
     }
 
+    // Mount SD card (1-bit mode for ESP32-CAM) for capture storage
+    setupSD();
+
     // Disable WiFi power saving for consistent streaming performance
     WiFi.setSleep(false);
 
@@ -214,10 +233,6 @@ void setup() {
             } else {
                 Serial.println("[Camera] Initialization complete!");
                 Serial.printf("[Camera] cameraReady = %d\n", cameraReady);
-                
-                // Mount SD card AFTER camera init (like Arduino sketch)
-                Serial.println("[SD] Mounting SD card after camera init...");
-                setupSD();
             }
             vTaskDelete(NULL);
         },
@@ -258,23 +273,11 @@ void loop() {
     // Handle OTA updates (disabled)
     // ArduinoOTA.handle();
 
-    // Check for WiFi fallback AP mode
-    checkWiFiFallback();
-
-    // Handle WiFi reconnection
     if (WiFi.status() != WL_CONNECTED) {
         if (currentMillis - lastWiFiCheck >= WIFI_RECONNECT_INTERVAL) {
             Serial.println("WiFi disconnected, attempting reconnection...");
             WiFi.reconnect();
             lastWiFiCheck = currentMillis;
-        }
-    } else {
-        // WiFi reconnected - stop fallback AP if running
-        if (fallbackAPActive) {
-            Serial.println("[WiFi] STA reconnected, stopping fallback AP");
-            WiFi.softAPdisconnect(true);
-            fallbackAPActive = false;
-            wifiDisconnectTime = 0;
         }
     }
 
@@ -301,15 +304,6 @@ void loop() {
     if (motionEnabled && cameraReady) {
         if (currentMillis - lastMotionCheck >= MOTION_CHECK_INTERVAL) {
             if (checkCameraMotion()) {
-                // Save to SD card if available
-                if (sdReady) {
-                    camera_fb_t* fb = capturePhoto();
-                    if (fb) {
-                        saveImageToSD(fb, "motion");
-                        returnFrameBuffer(fb);
-                    }
-                }
-                
                 // Motion detected - publish to MQTT
                 if (mqttConnected) {
                     JsonDocument doc;
@@ -317,7 +311,6 @@ void loop() {
                     doc["motion"] = true;
                     doc["timestamp"] = currentMillis / 1000;
                     doc["count"] = motionDetectCount;
-                    doc["sd_saved"] = sdReady;
 
                     String output;
                     serializeJson(doc, output);
@@ -613,21 +606,35 @@ void gracefulSDShutdown() {
 void setupSD() {
     Serial.println("[SD] Mounting SD card...");
     
+    // ESP32-CAM: Reduce CPU frequency for stable SD_MMC operations
+    #ifndef ARDUINO_FREENOVE_ESP32_S3_WROOM
+    setCpuFrequencyMhz(160);  // Reduce from 240MHz to 160MHz for SD stability
+    Serial.println("[SD] CPU frequency reduced to 160MHz for SD_MMC stability");
+    #endif
+    
+    // Configure SD_MMC pins FIRST (critical for ESP32-S3)
+    #ifdef ARDUINO_FREENOVE_ESP32_S3_WROOM
+    Serial.println("[SD] Configuring pins for ESP32-S3...");
+    SD_MMC.setPins(SD_MMC_CLK, SD_MMC_CMD, SD_MMC_D0);
+    Serial.printf("[SD] Pins set: CLK=%d CMD=%d D0=%d\n", SD_MMC_CLK, SD_MMC_CMD, SD_MMC_D0);
+    #endif
+    
     // Use different SD_MMC initialization based on board
     #ifdef ARDUINO_FREENOVE_ESP32_S3_WROOM
-    // ESP32-S3: requires full parameters with 4-bit mode
-    if (!SD_MMC.begin("/sdcard", true, true, SDMMC_FREQ_DEFAULT, 5)) {
+    // ESP32-S3: use 1-bit mode with proper parameters
+    Serial.println("[SD] Calling SD_MMC.begin(\"/sdcard\", true, false, 40000000)...");
+    if (!SD_MMC.begin("/sdcard", true, false, 40000000)) {
       Serial.println("[SD] Card Mount Failed");
       return;
     }
     #else
-    // ESP32-CAM: use 1-bit mode with mountpoint like working Arduino sketch
-    // Note: "/sdcard" mountpoint, true = 1-bit mode (critical for ESP32-CAM)
-    if (!SD_MMC.begin("/sdcard", true)) {
+    // ESP32-CAM: use defaults (no parameters) - matches working SDMMC_Test.ino
+    if (!SD_MMC.begin()) {
       Serial.println("[SD] Card Mount Failed");
       return;
     }
     #endif
+    Serial.println("[SD] SD_MMC.begin() returned success");
     
     uint8_t cardType = SD_MMC.cardType();
     if (cardType == CARD_NONE) {
@@ -651,13 +658,13 @@ void setupSD() {
     uint64_t cardSize = SD_MMC.cardSize() / (1024 * 1024);
     Serial.printf("[SD] Card mounted successfully: %llu MB, Type: %d\n", cardSize, cardType);
     
-    // Create capture directory - mkdir returns 0 if already exists (like Arduino sketch)
-    fs::FS &fs = SD_MMC;
-    int dirResult = fs.mkdir(SD_CAPTURE_DIR);
-    if (dirResult) {
-        Serial.printf("[SD] Created capture directory: %s\n", SD_CAPTURE_DIR);
-    } else {
-        Serial.printf("[SD] Capture directory ready: %s\n", SD_CAPTURE_DIR);
+    // Ensure capture directory exists
+    if (!SD_MMC.exists(SD_CAPTURE_DIR)) {
+        if (SD_MMC.mkdir(SD_CAPTURE_DIR)) {
+            Serial.printf("[SD] Created capture directory: %s\n", SD_CAPTURE_DIR);
+        } else {
+            Serial.println("[SD] Failed to create capture directory");
+        }
     }
 }
 
@@ -666,28 +673,10 @@ bool saveImageToSD(camera_fb_t* fb, const char* reason) {
         return false;
     }
     
-    // Check available space (keep at least 10MB free)
-    uint64_t totalBytes = SD_MMC.totalBytes();
-    uint64_t usedBytes = SD_MMC.usedBytes();
-    uint64_t freeBytes = totalBytes - usedBytes;
-    uint64_t freeMB = freeBytes / (1024 * 1024);
-    
-    if (freeMB < 10) {
-        Serial.printf("[SD] Low space: %llu MB free - attempting cleanup\n", freeMB);
-        deleteOldestCaptures(5);  // Delete 5 oldest files
-        // Recheck space
-        freeBytes = SD_MMC.totalBytes() - SD_MMC.usedBytes();
-        freeMB = freeBytes / (1024 * 1024);
-        if (freeMB < 5) {
-            Serial.printf("[SD] Still low space after cleanup: %llu MB\n", freeMB);
-            return false;
-        }
-    }
-    
     char path[80];
     snprintf(path, sizeof(path), "%s/%lu_%s.jpg", SD_CAPTURE_DIR, millis(), reason);
     
-    File file = SD_MMC.open(path, FILE_WRITE);
+    File file = SD_MMC.open(path, "w");
     if (!file) {
         Serial.println("[SD] Failed to open file for writing");
         return false;
@@ -882,41 +871,6 @@ void clearCrashLoop() {
     resetPrefs.putUInt("crash_flag", 0);
     resetPrefs.putUInt("crash_cnt", 0);
     Serial.println("[RESET] Crash loop flag cleared - boot successful");
-}
-
-void checkWiFiFallback() {
-    // Check if WiFi has been disconnected long enough to start fallback AP
-    unsigned long currentMillis = millis();
-    
-    if (WiFi.status() != WL_CONNECTED) {
-        // Track when WiFi first disconnected
-        if (wifiDisconnectTime == 0) {
-            wifiDisconnectTime = currentMillis;
-        }
-        
-        // Check if we've been disconnected long enough
-        if (!fallbackAPActive && (currentMillis - wifiDisconnectTime >= WIFI_FALLBACK_TIMEOUT)) {
-            Serial.println("[WiFi] Starting fallback AP mode");
-            
-            // Create AP name
-            String apName = String(deviceName);
-            apName.replace(" ", "-");
-            apName = "Cam-" + apName + "-Fallback";
-            
-            // Start AP alongside STA (device remains discoverable)
-            WiFi.mode(WIFI_AP_STA);
-            WiFi.softAP(apName.c_str());
-            
-            fallbackAPActive = true;
-            Serial.printf("[WiFi] Fallback AP started: %s\n", apName.c_str());
-            Serial.printf("[WiFi] AP IP: %s\n", WiFi.softAPIP().toString().c_str());
-            
-            logEventToMQTT("wifi_fallback_ap", "warning");
-        }
-    } else {
-        // WiFi is connected, reset disconnect timer
-        wifiDisconnectTime = 0;
-    }
 }
 
 // ==================== End Reset Detection & Recovery ====================
@@ -1135,9 +1089,28 @@ void setupOTA() {
             type = "filesystem";
         }
         Serial.println("[OTA] Starting update: " + type);
-        
-        // Log OTA start event to MQTT
+
+        // Set OTA in progress flag
+        otaInProgress = true;
+
+        // Log OTA start event to MQTT (before disconnecting)
         logEventToMQTT("ota_start", "info");
+
+        // CRITICAL: Stop all services before OTA to prevent crashes
+        Serial.println("[OTA] Stopping web server...");
+        server.end();
+
+        Serial.println("[OTA] Disconnecting MQTT gracefully...");
+        gracefulMqttDisconnect();
+
+        // Stop camera to free memory
+        Serial.println("[OTA] Deinitializing camera...");
+        if (cameraReady) {
+            esp_camera_deinit();
+            cameraReady = false;
+        }
+
+        Serial.println("[OTA] Services stopped, ready for update");
     });
 
     ArduinoOTA.onEnd([]() {
@@ -1169,7 +1142,10 @@ void setupOTA() {
         else if (error == OTA_RECEIVE_ERROR) errorMsg = "Receive Failed";
         else if (error == OTA_END_ERROR) errorMsg = "End Failed";
         Serial.println(errorMsg);
-        
+
+        // Clear OTA in progress flag on error
+        otaInProgress = false;
+
         // Log OTA error to MQTT
         logEventToMQTT("ota_error", "error");
     });
@@ -1232,59 +1208,53 @@ void setupWebServer() {
             request->send(503, "application/json", "{\"status\":\"sd_not_ready\"}");
             return;
         }
-        
-        uint64_t totalBytes = SD_MMC.totalBytes();
-        uint64_t usedBytes = SD_MMC.usedBytes();
-        uint64_t freeBytes = totalBytes - usedBytes;
-        
-        // Count files in captures directory
-        int fileCount = 0;
-        File dir = SD_MMC.open(SD_CAPTURE_DIR);
-        if (dir && dir.isDirectory()) {
-            File entry = dir.openNextFile();
-            while (entry) {
-                if (!entry.isDirectory()) fileCount++;
-                entry.close();
-                entry = dir.openNextFile();
-            }
-            dir.close();
-        }
-        
+
         JsonDocument doc;
-        doc["status"] = "ok";
-        doc["total_mb"] = totalBytes / (1024 * 1024);
-        doc["used_mb"] = usedBytes / (1024 * 1024);
-        doc["free_mb"] = freeBytes / (1024 * 1024);
-        doc["file_count"] = fileCount;
-        doc["free_percent"] = (float)freeBytes / totalBytes * 100.0;
-        
-        String output;
-        serializeJson(doc, output);
-        request->send(200, "application/json", output);
+        doc["ready"] = sdReady;
+        doc["card_size_mb"] = SD_MMC.cardSize() / (1024 * 1024);
+        doc["total_bytes"] = SD_MMC.totalBytes();
+        doc["used_bytes"] = SD_MMC.usedBytes();
+        doc["free_bytes"] = SD_MMC.totalBytes() - SD_MMC.usedBytes();
+
+        String response;
+        serializeJson(doc, response);
+        request->send(200, "application/json", response);
     });
 
-    // Delete oldest N captures
+    // SD card cleanup endpoint - delete oldest captures
     server.on("/sd/cleanup", HTTP_POST, [](AsyncWebServerRequest *request) {
         if (!sdReady) {
             request->send(503, "application/json", "{\"status\":\"sd_not_ready\"}");
             return;
         }
-        
-        int count = 5;  // Default: delete 5 oldest
+
+        // Default to deleting 10 oldest captures
+        int count = 10;
         if (request->hasParam("count", true)) {
             count = request->getParam("count", true)->value().toInt();
-            count = constrain(count, 1, 100);  // Safety limits
         }
-        
+
         bool success = deleteOldestCaptures(count);
-        
+
         JsonDocument doc;
-        doc["status"] = success ? "ok" : "error";
-        doc["requested"] = count;
-        
-        String output;
-        serializeJson(doc, output);
-        request->send(success ? 200 : 500, "application/json", output);
+        doc["status"] = success ? "success" : "error";
+        doc["deleted"] = count;
+
+        String response;
+        serializeJson(doc, response);
+        request->send(success ? 200 : 500, "application/json", response);
+    });
+
+    // Device name endpoint
+    server.on("/device-name", HTTP_GET, [](AsyncWebServerRequest *request) {
+        JsonDocument doc;
+        doc["device_name"] = deviceName;
+        doc["chip_id"] = deviceChipId;
+        doc["mac_address"] = deviceMac;
+
+        String response;
+        serializeJson(doc, response);
+        request->send(200, "application/json", response);
     });
 
     // Stream endpoint (basic MJPEG)
@@ -1325,11 +1295,6 @@ void setupWebServer() {
         // Reset/recovery status
         doc["boot_reason"] = configPortalReason;
         doc["crash_count"] = rtcCrashCount;
-        doc["fallback_ap_active"] = fallbackAPActive;
-        if (fallbackAPActive) {
-            doc["fallback_ap_ip"] = WiFi.softAPIP().toString();
-        }
-        doc["wifi_disconnect_time"] = wifiDisconnectTime > 0 ? (millis() - wifiDisconnectTime) / 1000 : 0;
 
         if (cameraReady) {
             sensor_t *s = esp_camera_sensor_get();
@@ -1462,6 +1427,30 @@ void reconnectMQTT() {
     }
 }
 
+void gracefulMqttDisconnect() {
+    if (!mqttConnected || !mqttClient.connected()) {
+        return;
+    }
+
+    Serial.println("[MQTT] Gracefully disconnecting...");
+
+    // Attempt clean disconnect with timeout
+    mqttClient.disconnect();
+
+    unsigned long disconnectStart = millis();
+    while (mqttClient.connected() && (millis() - disconnectStart) < 500) {
+        yield();  // Allow TCP stack to process
+    }
+
+    mqttConnected = false;
+
+    if (!mqttClient.connected()) {
+        Serial.println("[MQTT] Disconnected cleanly");
+    } else {
+        Serial.println("[MQTT] Disconnect timeout, forcing");
+    }
+}
+
 void publishStatus() {
     if (!mqttConnected) return;
 
@@ -1496,7 +1485,6 @@ void publishStatus() {
     // Reset/recovery status
     doc["boot_reason"] = configPortalReason;
     doc["crash_count"] = rtcCrashCount;
-    doc["fallback_ap_active"] = fallbackAPActive;
 
     String output;
     serializeJson(doc, output);
@@ -1625,6 +1613,12 @@ void captureAndPublishWithImage() {
 }
 
 void mqttCallback(char* topic, byte* payload, unsigned int length) {
+    // Ignore MQTT commands during OTA to prevent conflicts
+    if (otaInProgress) {
+        Serial.println("[MQTT] Ignoring command during OTA");
+        return;
+    }
+
     Serial.printf("MQTT message received on topic: %s\n", topic);
 
     // Parse JSON command
@@ -1658,346 +1652,356 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
 }
 
 void handleRoot(AsyncWebServerRequest *request) {
+    // Try to serve gzipped HTML from LittleFS (6.7KB vs 27KB uncompressed)
+    if (littleFsReady && LittleFS.exists("/index.html.gz")) {
+        AsyncWebServerResponse *response = request->beginResponse(LittleFS, "/index.html.gz", "text/html");
+        response->addHeader("Content-Encoding", "gzip");
+        response->addHeader("Cache-Control", "no-cache, no-store, must-revalidate");
+        request->send(response);
+        return;
+    }
+
+    // Fallback: embedded HTML if LittleFS file missing
     String html = R"=====(<!doctype html>
 <html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>ESP32-CAM Surveillance</title>
+<title>ESP32-S3 Surveillance</title>
 <style>
-:root{
-  --primary-bg:#0f172a;
-  --secondary-bg:#1e293b;
-  --glass-bg:rgba(30,41,59,0.7);
-  --glass-border:rgba(148,163,184,0.15);
-  --accent-cyan:#00d9ff;
-  --accent-purple:#7c3aed;
-  --text-primary:#f1f5f9;
-  --text-secondary:#cbd5e1;
-  --text-muted:#94a3b8;
-  --success:#10b981;
-  --warning:#f59e0b;
-  --error:#ef4444;
-}
-*{box-sizing:border-box;margin:0;padding:0}
-body{font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif;background:linear-gradient(135deg,var(--primary-bg) 0%,#1a2942 100%);color:var(--text-primary);font-size:14px;height:100vh;overflow:hidden;backdrop-filter:blur(10px)}
-::selection{background:var(--accent-cyan);color:var(--primary-bg)}
-.app-container{display:flex;flex-direction:column;height:100vh;gap:12px;padding:16px;overflow:hidden}
-/* ===== STATUS BAR ===== */
-.status-bar{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:12px 16px;background:var(--glass-bg);border:1px solid var(--glass-border);border-radius:16px;backdrop-filter:blur(20px);box-shadow:0 8px 32px rgba(0,0,0,0.3)}
-.device-info{display:flex;align-items:center;gap:12px;flex:1;min-width:0}
-.device-icon{width:40px;height:40px;background:linear-gradient(135deg,var(--accent-purple),var(--accent-cyan));border-radius:12px;display:flex;align-items:center;justify-content:center;font-size:20px;flex-shrink:0;box-shadow:0 4px 16px rgba(124,58,237,0.3)}
-.device-details{display:flex;flex-direction:column;gap:2px;min-width:0;flex:1}
-.device-name{font-weight:600;font-size:15px;color:var(--text-primary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.device-meta{display:flex;gap:12px;font-size:12px;color:var(--text-muted);flex-wrap:wrap}
-.ip-address{display:flex;align-items:center;gap:6px;padding:6px 12px;background:rgba(0,217,255,0.1);border:1px solid rgba(0,217,255,0.3);border-radius:8px;border-radius:12px;cursor:pointer;transition:all 0.3s ease;font-family:monospace}
-.ip-address:hover{background:rgba(0,217,255,0.2);border-color:var(--accent-cyan)}
-.ip-label{color:var(--text-muted);font-size:11px}
-.ip-value{color:var(--accent-cyan);font-weight:600}
-.status-indicators{display:flex;gap:8px;flex-wrap:wrap}
-.status-indicator{display:flex;align-items:center;gap:6px;padding:6px 12px;background:var(--secondary-bg);border:1px solid var(--glass-border);border-radius:12px;font-size:12px;font-weight:500}
-.status-dot{width:8px;height:8px;border-radius:50%;animation:pulse 2s infinite}
-.status-dot.ok{background:var(--success);box-shadow:0 0 8px var(--success)}
-.status-dot.warn{background:var(--warning);animation:pulse-warn 2s infinite}
-.status-dot.err{background:var(--error)}
-@keyframes pulse{0%,100%{opacity:1}50%{opacity:0.5}}
-@keyframes pulse-warn{0%,100%{opacity:1}50%{opacity:0.6}}
-/* ===== MAIN LAYOUT ===== */
-.main-content{display:flex;gap:12px;flex:1;min-height:0;overflow:hidden}
-.stream-section{display:flex;flex-direction:column;flex:1;gap:12px;min-width:0}
-.viewer-glass{background:var(--glass-bg);border:1px solid var(--glass-border);border-radius:16px;backdrop-filter:blur(20px);display:flex;align-items:center;justify-content:center;flex:1;min-height:0;position:relative;overflow:hidden;box-shadow:0 8px 32px rgba(0,0,0,0.3)}
-.viewer-glass img{max-width:100%;max-height:100%;object-fit:contain}
-.viewer-glass.no-image::before{content:'📷';font-size:64px;opacity:0.2;position:absolute;z-index:0}
-.viewer-glass.no-image::after{content:'No Image';position:absolute;font-size:18px;color:var(--text-muted);opacity:0.4;z-index:0;top:calc(50% + 32px)}
-/* ===== CONTROL PANEL ===== */
-.control-panel{display:flex;flex-direction:column;gap:12px;width:320px;background:var(--glass-bg);border:1px solid var(--glass-border);border-radius:16px;backdrop-filter:blur(20px);padding:16px;box-shadow:0 8px 32px rgba(0,0,0,0.3);overflow-y:auto}
-.control-panel::-webkit-scrollbar{width:6px}
-.control-panel::-webkit-scrollbar-track{background:transparent}
-.control-panel::-webkit-scrollbar-thumb{background:var(--glass-border);border-radius:3px}
-.control-panel::-webkit-scrollbar-thumb:hover{background:var(--text-muted)}
-.section{display:flex;flex-direction:column;gap:8px}
-.section-label{font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:1px;color:var(--accent-cyan);margin-bottom:4px;opacity:0.8}
-.button-group{display:flex;gap:8px;flex-wrap:wrap}
-button{background:linear-gradient(135deg,var(--accent-cyan),#00a8cc);color:#000;border:none;padding:10px 16px;border-radius:12px;font-weight:600;cursor:pointer;transition:all 0.3s ease;font-size:13px;box-shadow:0 4px 12px rgba(0,217,255,0.2);white-space:nowrap}
-button:hover{transform:translateY(-2px);box-shadow:0 6px 20px rgba(0,217,255,0.4)}
-button:active{transform:translateY(0);opacity:0.8}
-button.secondary{background:var(--secondary-bg);color:var(--text-primary);border:1px solid var(--glass-border)}
-button.secondary:hover{background:var(--glass-bg);border-color:var(--accent-cyan)}
-button.danger{background:linear-gradient(135deg,#ef4444,#dc2626);box-shadow:0 4px 12px rgba(239,68,68,0.2)}
-button.danger:hover{box-shadow:0 6px 20px rgba(239,68,68,0.4)}
-button.small{padding:8px 12px;font-size:12px}
-button.flex-1{flex:1;min-width:100px}
-.control-input{display:flex;flex-direction:column;gap:6px}
-.control-input label{font-size:13px;font-weight:500;color:var(--text-secondary)}
-.control-input input[type=range],.control-input select{width:100%;padding:8px;background:var(--secondary-bg);border:1px solid var(--glass-border);border-radius:8px;color:var(--text-primary);font-size:13px}
-.control-input select{cursor:pointer}
-.slider-value{font-size:12px;color:var(--text-muted);text-align:right}
-.toggle-switch{display:flex;align-items:center;justify-content:space-between}
-.switch{position:relative;width:50px;height:28px}
-.switch input{display:none}
-.switch-slider{position:absolute;width:100%;height:100%;background:var(--secondary-bg);border:1px solid var(--glass-border);border-radius:14px;cursor:pointer;transition:0.3s;display:flex;align-items:center;padding:2px}
-.switch-slider::after{content:'';width:24px;height:24px;background:#fff;border-radius:50%;transition:0.3s;display:flex;align-items:center;justify-content:center}
-.switch input:checked+.switch-slider{background:var(--accent-cyan);border-color:var(--accent-cyan)}
-.switch input:checked+.switch-slider::after{transform:translateX(22px)}
-.tabs{display:flex;gap:4px;margin-bottom:8px;border-bottom:1px solid var(--glass-border);padding-bottom:8px}
-.tab-btn{background:transparent;color:var(--text-muted);padding:8px 12px;border:none;cursor:pointer;border-bottom:2px solid transparent;transition:all 0.3s;font-size:12px;font-weight:500}
-.tab-btn.active{color:var(--accent-cyan);border-bottom-color:var(--accent-cyan)}
-.tab-content{display:none}
-.tab-content.active{display:flex;flex-direction:column;gap:8px}
-/* ===== RESPONSIVE ===== */
-@media (max-width:1400px){
-.control-panel{width:280px}
-}
+:root{--bg:#0b0f14;--panel:#121821;--panel-alt:#0f141c;--border:#1f2a38;--text:#e6edf3;--muted:#9aa7b2;--accent:#00bcd4;--accent-contrast:#07343b;--danger:#ff5252;}
+*{box-sizing:border-box}
+body{font-family:Inter,Arial,Helvetica,sans-serif;background:var(--bg);color:var(--text);font-size:14px;margin:0;padding:0;height:100vh;overflow:hidden}
+a{color:var(--text)}
+.container{display:flex;flex-direction:column;height:100vh;overflow:hidden}
+#top-bar{background:var(--panel);border-bottom:1px solid var(--border);padding:12px 16px;display:flex;gap:12px;align-items:center;flex-wrap:wrap;flex-shrink:0}
+#controls-group{display:flex;gap:12px;align-items:center;flex:1;flex-wrap:wrap;min-width:0}
+#stream-area{display:flex;flex:1;min-height:0;gap:12px;padding:12px;overflow:hidden}
+#stream-container{flex:1;display:flex;flex-direction:column;min-width:0;background:var(--panel-alt);border:1px solid var(--border);border-radius:8px;overflow:hidden;position:relative;align-items:center;justify-content:center;min-height:300px}
+#stream-container img{max-width:100%;max-height:100%;object-fit:contain;position:relative;z-index:1}
+#stream-container.no-image::before{content:'📷';font-size:clamp(48px,8vw,128px);opacity:0.3;position:absolute;z-index:0;line-height:1}
+#stream-container.no-image::after{content:'No Image';position:absolute;top:calc(50% + clamp(35px,5vw,80px));font-size:clamp(14px,1.5vw,20px);color:var(--muted);opacity:0.6;z-index:0;white-space:nowrap}
+#right-panel{width:300px;background:var(--panel);border:1px solid var(--border);border-radius:8px;display:flex;flex-direction:column;transition:width 0.3s ease,opacity 0.3s ease;max-height:100%}
+#right-panel.collapsed{width:0;opacity:0;overflow:hidden;padding:0;border:0}
+#right-toggle{width:30px;height:30px;padding:0;margin:0;background:var(--accent)}
+#mobile-backdrop{display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.5);z-index:998;opacity:0;transition:opacity 0.3s ease}
+#mobile-backdrop.visible{display:block;opacity:1}
+.panel-header{padding:12px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;font-weight:600;flex-shrink:0}
+.panel-content{padding:12px;overflow-y:auto;overflow-x:hidden;flex:1;min-height:0}
+.panel-content::-webkit-scrollbar{width:8px}
+.panel-content::-webkit-scrollbar-track{background:var(--panel-alt);border-radius:4px}
+.panel-content::-webkit-scrollbar-thumb{background:var(--border);border-radius:4px}
+.panel-content::-webkit-scrollbar-thumb:hover{background:var(--muted)}
+.input-group{display:flex;flex-wrap:nowrap;line-height:22px;margin:8px 0;padding:8px;border:1px solid var(--border);border-radius:8px;background:var(--panel-alt);gap:8px;align-items:center}
+.input-group>label{display:inline-block;min-width:85px;white-space:nowrap;font-size:13px}
+.input-group input,.input-group select{flex:1;min-width:0}
+.range-max,.range-min{display:inline-block;padding:0 2px;color:var(--muted);font-size:11px;min-width:15px;text-align:center}
+.slider-container{display:flex;gap:2px;align-items:center;flex:1;max-width:100%}
+.control-row{display:flex;gap:6px;align-items:center}
+.control-row.tight{gap:4px}
+.control-row label{min-width:60px;white-space:nowrap}
+.control-row.tight label{min-width:auto}
+.control-row select,.control-row input[type=range]{flex:1}
+button{display:inline-block;margin:3px;padding:0 10px;border:0;line-height:28px;cursor:pointer;color:#001318;background:var(--accent);border-radius:8px;font-size:14px;outline:0;box-shadow:0 0 0 1px var(--accent-contrast) inset;white-space:nowrap}
+button:hover{filter:brightness(1.08)}
+button:active{filter:brightness(0.95)}
+button.disabled{cursor:default;opacity:.6}
+button.small{padding:0 8px;line-height:24px;font-size:12px}
+button.preset{flex:1;min-width:80px}
+.button-group{display:flex;gap:6px;flex-wrap:wrap}
+.status-pill{display:inline-flex;align-items:center;gap:6px;padding:0 10px;height:28px;border-radius:999px;font-size:12px;font-weight:600;line-height:1;background:var(--panel-alt);color:var(--muted);border:1px solid var(--border)}
+.status-pill .dot{width:10px;height:10px;border-radius:50%;background:var(--border);display:inline-block}
+.status-ok{color:#0ecb81;border-color:#0ecb81;background:rgba(14,203,129,0.08)}
+.status-ok .dot{background:#0ecb81}
+.status-warn{color:#f5a524;border-color:#f5a524;background:rgba(245,165,36,0.08)}
+.status-warn .dot{background:#f5a524}
+.status-bad{color:#ff5c5c;border-color:#ff5c5c;background:rgba(255,92,92,0.08)}
+.status-bad .dot{background:#ff5c5c}
+input[type=range]{-webkit-appearance:none;height:22px;background:var(--panel-alt);cursor:pointer;margin:0;border-radius:6px}
+input[type=range]:focus{outline:0}
+input[type=range]::-webkit-slider-runnable-track{width:100%;height:2px;cursor:pointer;background:var(--text);border-radius:0;border:0}
+input[type=range]::-webkit-slider-thumb{border:1px solid rgba(0,0,30,0);height:22px;width:22px;border-radius:50px;background:var(--accent);cursor:pointer;-webkit-appearance:none;margin-top:-11.5px}
+.switch{display:inline-block;position:relative;height:22px}
+.switch input{outline:0;opacity:0;width:0;height:0}
+.slider{width:50px;height:22px;border-radius:22px;cursor:pointer;background-color:#3a4b61;display:inline-block;transition:.4s}
+.slider:before{position:absolute;content:"";border-radius:50%;height:16px;width:16px;left:4px;top:3px;background-color:#fff;display:inline-block;transition:.4s}
+input:checked+.slider{background-color:var(--accent)}
+input:checked+.slider:before{-webkit-transform:translateX(26px);transform:translateX(26px)}
+select{border:1px solid var(--border);font-size:14px;height:22px;outline:0;border-radius:8px;background:var(--panel-alt);color:var(--text);padding:2px 6px}
+.close{position:absolute;right:5px;top:5px;background:var(--danger);width:30px;height:30px;border-radius:100%;color:#fff;text-align:center;line-height:30px;cursor:pointer;box-shadow:0 0 0 1px #7a1e1e inset}
+.hidden{display:none}
+.section-title{font-size:12px;font-weight:600;color:var(--muted);margin-top:12px;margin-bottom:6px;text-transform:uppercase;letter-spacing:.5px}
+#device-name-bar{display:none}
 @media (max-width:1200px){
-.control-panel{width:260px}
-.status-bar{flex-direction:column;align-items:flex-start}
-.ip-address{display:none}
+#device-name-bar{display:inline-block}
+#right-panel{width:250px}
+.input-group>label{min-width:90px}
 }
 @media (max-width:768px){
-.app-container{padding:8px;gap:8px}
-.main-content{flex-direction:column}
-.control-panel{display:none;width:100%}
-.control-panel.mobile-visible{display:flex;position:fixed;bottom:0;left:0;right:0;width:100%;height:50vh;border-radius:16px 16px 0 0;z-index:1000;max-height:70vh;overflow-y:auto}
-.mobile-toggle{display:inline-flex;position:fixed;bottom:16px;right:16px;width:56px;height:56px;border-radius:50%;z-index:1001;align-items:center;justify-content:center;box-shadow:0 8px 24px rgba(0,0,0,0.4)}
-.mobile-backdrop{display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.5);z-index:999;opacity:0;transition:opacity 0.3s}
-.mobile-backdrop.visible{display:block;opacity:1}
+#top-bar{flex-direction:column;align-items:stretch;padding:8px}
+#stream-area{flex-direction:column;gap:8px;padding:8px;overflow-y:auto}
+#stream-container{min-height:200px;flex:0 0 auto}
+#right-panel{display:none;width:100%;flex:0 0 auto}
+#right-toggle{display:block;position:fixed;bottom:16px;right:16px;width:48px;height:48px;border-radius:50%;z-index:1001;font-size:20px;box-shadow:0 4px 12px rgba(0,0,0,0.3)}
+#right-panel.mobile-visible{display:flex;position:fixed;right:0;top:0;bottom:0;z-index:1000;height:100vh;width:90%;max-width:320px;box-shadow:-4px 0 12px rgba(0,0,0,0.3);overflow-y:auto}
+.panel-content{padding:8px;overflow-y:auto}
+.input-group{margin:6px 0;padding:6px}
+button{font-size:13px;padding:0 8px;line-height:26px}
+.section-title{margin-top:8px;margin-bottom:4px}
 }
 @media (max-width:480px){
-.device-meta{font-size:11px;gap:8px}
-.device-name{font-size:14px}
-.control-panel.mobile-visible{height:100%}
-.status-bar{padding:10px 12px}
+#stream-container{min-height:180px}
+#right-panel.mobile-visible{width:100%;max-width:100%}
+.input-group{flex-direction:column;align-items:stretch}
+.input-group>label{min-width:auto;margin-bottom:4px}
+.slider-container{width:100%}
 }
 </style>
 </head>
 <body>
-<div class="app-container">
-<!-- STATUS BAR -->
-<div class="status-bar">
-  <div class="device-info">
-    <div class="device-icon">📷</div>
-    <div class="device-details">
-      <div class="device-name">ESP32-CAM <span id="device-name">Loading...</span></div>
-      <div class="device-meta">
-        <span id="device-id">--</span>
-        <span id="wifi-status">WiFi: --</span>
-        <span id="mqtt-status">MQTT: --</span>
-        <span id="sd-status">SD: --</span>
-      </div>
-    </div>
-  </div>
-  <div class="ip-address" id="ip-copy" title="Click to copy">
-    <span class="ip-label">IP:</span>
-    <span class="ip-value" id="ip-value">--</span>
-  </div>
-  <div class="status-indicators">
-    <div class="status-indicator">
-      <span class="status-dot ok"></span>
-      <span>System</span>
-    </div>
-    <div class="status-indicator">
-      <span class="status-dot" id="motion-indicator">●</span>
-      <span>Motion</span>
-    </div>
-  </div>
+<div class="container">
+<div id="top-bar">
+<button id="get-still">Capture</button>
+<button id="toggle-stream">Start Stream</button>
+<span id="status-pill" class="status-pill status-warn"><span class="dot"></span><span id="status-text">Initializing...</span></span>
+<span id="device-name-bar" style="font-size:14px;font-weight:600;color:var(--text);white-space:nowrap">Loading...</span>
+<div id="controls-group">
+<div class="control-row">
+<label for="framesize">Resolution:</label>
+<select id="framesize" class="default-action">
+<option value="13">UXGA</option>
+<option value="12">SXGA</option>
+<option value="11">HD</option>
+<option value="10">XGA</option>
+<option value="9">SVGA</option>
+<option value="8" selected="selected">VGA</option>
+<option value="7">HVGA</option>
+<option value="6">CIF</option>
+<option value="5">QVGA</option>
+<option value="3">HQVGA</option>
+<option value="1">QQVGA</option>
+</select>
 </div>
-
-<!-- MAIN CONTENT -->
-<div class="main-content">
-  <div class="stream-section">
-    <div class="viewer-glass no-image">
-      <img id="stream" src="" alt="Live Stream">
-    </div>
-    <div style="display:flex;gap:12px;flex-wrap:wrap">
-      <button id="get-still" class="flex-1">📸 Capture</button>
-      <button id="toggle-stream" class="flex-1">▶ Stream</button>
-      <button id="reset-sensor" class="flex-1 danger small">⟲ Reset</button>
-    </div>
-  </div>
-
-  <!-- CONTROL PANEL -->
-  <div class="control-panel" id="control-panel">
-    <div class="tabs">
-      <button class="tab-btn active" data-tab="quick">Quick</button>
-      <button class="tab-btn" data-tab="image">Image</button>
-      <button class="tab-btn" data-tab="advanced">Advanced</button>
-      <button class="tab-btn" data-tab="storage">Storage</button>
-    </div>
-
-    <!-- QUICK TAB -->
-    <div class="tab-content active" id="quick-tab">
-      <div class="section">
-        <label class="section-label">Resolution</label>
-        <select id="framesize" class="default-action">
-          <option value="8" selected>VGA (640×480)</option>
-          <option value="9">SVGA (800×600)</option>
-          <option value="10">XGA (1024×768)</option>
-          <option value="11">HD (1280×720)</option>
-          <option value="12">SXGA (1280×1024)</option>
-        </select>
-      </div>
-      
-      <div class="section">
-        <label class="section-label">Quality</label>
-        <div class="control-input">
-          <input type="range" id="quality" min="10" max="63" value="8" class="default-action">
-          <span class="slider-value" id="quality-val">8</span>
-        </div>
-      </div>
-
-      <div class="section">
-        <label class="section-label">Presets</label>
-        <div class="button-group">
-          <button id="preset-smooth" class="small flex-1">⚡ Fast</button>
-          <button id="preset-balanced" class="small flex-1 secondary">⚙ Balanced</button>
-          <button id="preset-detail" class="small flex-1">✨ Quality</button>
-        </div>
-      </div>
-
-      <div class="section">
-        <label class="section-label">Features</label>
-        <div class="control-input toggle-switch">
-          <label>Motion Detection</label>
-          <label class="switch">
-            <input id="motion_enabled" type="checkbox" checked class="default-action">
-            <span class="switch-slider"></span>
-          </label>
-        </div>
-        <div class="control-input toggle-switch">
-          <label>Flashlight</label>
-          <label class="switch">
-            <input id="flash_master" type="checkbox">
-            <span class="switch-slider"></span>
-          </label>
-        </div>
-      </div>
-    </div>
-
-    <!-- IMAGE TAB -->
-    <div class="tab-content" id="image-tab">
-      <div class="section">
-        <label class="section-label">Brightness</label>
-        <div class="control-input">
-          <input type="range" id="brightness" min="-2" max="2" value="0" class="default-action">
-        </div>
-      </div>
-      <div class="section">
-        <label class="section-label">Contrast</label>
-        <div class="control-input">
-          <input type="range" id="contrast" min="-2" max="2" value="0" class="default-action">
-        </div>
-      </div>
-      <div class="section">
-        <label class="section-label">Saturation</label>
-        <div class="control-input">
-          <input type="range" id="saturation" min="-2" max="2" value="0" class="default-action">
-        </div>
-      </div>
-      <div class="section">
-        <label class="section-label">Special Effect</label>
-        <select id="special_effect" class="default-action">
-          <option value="0" selected>None</option>
-          <option value="1">Negative</option>
-          <option value="2">Grayscale</option>
-          <option value="3">Red Tint</option>
-          <option value="4">Green Tint</option>
-          <option value="5">Blue Tint</option>
-          <option value="6">Sepia</option>
-        </select>
-      </div>
-      <div class="control-input toggle-switch">
-        <label>H-Mirror</label>
-        <label class="switch">
-          <input id="hmirror" type="checkbox" class="default-action">
-          <span class="switch-slider"></span>
-        </label>
-      </div>
-      <div class="control-input toggle-switch">
-        <label>V-Flip</label>
-        <label class="switch">
-          <input id="vflip" type="checkbox" class="default-action">
-          <span class="switch-slider"></span>
-        </label>
-      </div>
-    </div>
-
-    <!-- ADVANCED TAB -->
-    <div class="tab-content" id="advanced-tab">
-      <div class="section">
-        <label class="section-label">White Balance</label>
-        <div class="control-input toggle-switch">
-          <label>AWB</label>
-          <label class="switch">
-            <input id="awb" type="checkbox" checked class="default-action">
-            <span class="switch-slider"></span>
-          </label>
-        </div>
-        <select id="wb_mode" class="default-action">
-          <option value="0" selected>Auto</option>
-          <option value="1">Sunny</option>
-          <option value="2">Cloudy</option>
-          <option value="3">Office</option>
-          <option value="4">Home</option>
-        </select>
-      </div>
-      <div class="section">
-        <label class="section-label">Exposure</label>
-        <div class="control-input toggle-switch">
-          <label>AEC</label>
-          <label class="switch">
-            <input id="aec" type="checkbox" checked class="default-action">
-            <span class="switch-slider"></span>
-          </label>
-        </div>
-        <div class="control-input" id="aec_value-group" style="display:none">
-          <label>Exposure Value</label>
-          <input type="range" id="aec_value" min="0" max="1200" value="300" class="default-action">
-        </div>
-      </div>
-      <div class="section">
-        <label class="section-label">Gain</label>
-        <div class="control-input toggle-switch">
-          <label>AGC</label>
-          <label class="switch">
-            <input id="agc" type="checkbox" checked class="default-action">
-            <span class="switch-slider"></span>
-          </label>
-        </div>
-        <div class="control-input" id="gainceiling-group" style="display:none">
-          <label>Gain Ceiling</label>
-          <input type="range" id="gainceiling" min="0" max="6" value="0" class="default-action">
-        </div>
-      </div>
-      <div class="control-input toggle-switch">
-        <label>BPC</label>
-        <label class="switch">
-          <input id="bpc" type="checkbox" class="default-action">
-          <span class="switch-slider"></span>
-        </label>
-      </div>
-    </div>
-
-    <!-- STORAGE TAB -->
-    <div class="tab-content" id="storage-tab">
-      <div class="section">
-        <label class="section-label">SD Card</label>
-        <div style="padding:8px;background:var(--secondary-bg);border-radius:8px;margin-bottom:12px;font-size:12px;color:var(--text-secondary)">
-          <div id="sd-info">Loading...</div>
-        </div>
-        <div class="button-group">
-          <button id="clear_sd" class="danger small flex-1">🗑 Clear</button>
-          <button id="format_sd" class="danger small flex-1">⚠️ Format</button>
-        </div>
-        <div id="sd_status" style="font-size:12px;color:var(--text-muted);margin-top:8px;text-align:center;min-height:16px"></div>
-      </div>
-    </div>
-  </div>
+<div class="control-row">
+<label for="quality">Quality:</label>
+<input type="range" id="quality" min="10" max="63" value="8" class="default-action" style="width:100px">
+</div>
+<div class="control-row tight">
+<label for="motion_enabled">Motion:</label>
+<div class="switch">
+<input id="motion_enabled" type="checkbox" checked="checked">
+<label class="slider" for="motion_enabled"></label>
 </div>
 </div>
-
-<!-- MOBILE TOGGLE -->
-<button class="mobile-toggle" id="mobile-toggle" style="display:none">⚙️</button>
-<div class="mobile-backdrop" id="mobile-backdrop"></div>
+<div class="button-group">
+<button id="preset-smooth" class="preset small">Fast</button>
+<button id="preset-balanced" class="preset small">Default</button>
+<button id="preset-detail" class="preset small">High-Quality</button>
+<button id="reset-sensor" class="small" style="background:var(--danger);color:#fff;padding:0 12px">Reset Cam</button>
+<button id="clear_sd" class="preset small" style="margin-left:8px">Clear SD</button>
+<button id="format_sd" class="preset small">Format SD</button>
+<div id="sd_status" style="font-size:10px;font-weight:bold;padding:0 4px;"></div>
+</div>
+</div>
+<button id="right-toggle">⚙</button>
+</div>
+<div id="mobile-backdrop"></div>
+<div id="stream-area">
+<div id="stream-container">
+<img id="stream" src="">
+</div>
+<div id="right-panel">
+<div class="panel-header">
+<div style="display:flex;flex-direction:column;gap:4px;flex:1">
+<span style="font-weight:600">Camera: <span id="device-name">Loading...</span></span>
+<span style="font-size:12px;color:var(--muted)">ID: <span id="device-id">--</span></span>
+<div style="display:flex;gap:12px;font-size:12px;color:var(--muted)">
+<span id="wifi-status">WiFi: --</span>
+<span id="mqtt-status">MQTT: --</span>
+</div>
+</div>
+</div>
+<div class="panel-content">
+<nav id="menu">
+<div class="section-title">Image Settings</div>
+<div class="input-group" id="brightness-group">
+<label for="brightness">Brightness</label>
+<div class="slider-container">
+<span class="range-min">-2</span>
+<input type="range" id="brightness" min="-2" max="2" value="0" class="default-action" style="flex:1">
+<span class="range-max">2</span>
+</div>
+</div>
+<div class="input-group" id="contrast-group">
+<label for="contrast">Contrast</label>
+<div class="slider-container">
+<span class="range-min">-2</span>
+<input type="range" id="contrast" min="-2" max="2" value="0" class="default-action" style="flex:1">
+<span class="range-max">2</span>
+</div>
+</div>
+<div class="input-group" id="saturation-group">
+<label for="saturation">Saturation</label>
+<div class="slider-container">
+<span class="range-min">-2</span>
+<input type="range" id="saturation" min="-2" max="2" value="0" class="default-action" style="flex:1">
+<span class="range-max">2</span>
+</div>
+</div>
+<div class="section-title">Effects</div>
+<div class="input-group" id="special_effect-group">
+<label for="special_effect">Effect</label>
+<select id="special_effect" class="default-action" style="flex:1">
+<option value="0" selected="selected">None</option>
+<option value="1">Negative</option>
+<option value="2">Grayscale</option>
+<option value="3">Red Tint</option>
+<option value="4">Green Tint</option>
+<option value="5">Blue Tint</option>
+<option value="6">Sepia</option>
+</select>
+</div>
+<div class="input-group" id="hmirror-group">
+<label for="hmirror">H-Mirror</label>
+<div class="switch">
+<input id="hmirror" type="checkbox" class="default-action">
+<label class="slider" for="hmirror"></label>
+</div>
+</div>
+<div class="input-group" id="vflip-group">
+<label for="vflip">V-Flip</label>
+<div class="switch">
+<input id="vflip" type="checkbox" class="default-action">
+<label class="slider" for="vflip"></label>
+</div>
+</div>
+<div class="section-title">Exposure & Gain</div>
+<div class="input-group" id="awb-group">
+<label for="awb">AWB</label>
+<div class="switch">
+<input id="awb" type="checkbox" class="default-action" checked="checked">
+<label class="slider" for="awb"></label>
+</div>
+</div>
+<div class="input-group" id="awb_gain-group">
+<label for="awb_gain">AWB Gain</label>
+<div class="switch">
+<input id="awb_gain" type="checkbox" class="default-action" checked="checked">
+<label class="slider" for="awb_gain"></label>
+</div>
+</div>
+<div class="input-group" id="wb_mode-group">
+<label for="wb_mode">WB Mode</label>
+<select id="wb_mode" class="default-action" style="flex:1">
+<option value="0" selected="selected">Auto</option>
+<option value="1">Sunny</option>
+<option value="2">Cloudy</option>
+<option value="3">Office</option>
+<option value="4">Home</option>
+</select>
+</div>
+<div class="input-group" id="aec-group">
+<label for="aec">AEC Sensor</label>
+<div class="switch">
+<input id="aec" type="checkbox" class="default-action" checked="checked">
+<label class="slider" for="aec"></label>
+</div>
+</div>
+<div class="input-group" id="aec_value-group">
+<label for="aec_value">Exposure</label>
+<div class="slider-container">
+<span class="range-min">0</span>
+<input type="range" id="aec_value" min="0" max="1200" value="300" class="default-action">
+<span class="range-max">1200</span>
+</div>
+</div>
+<div class="input-group" id="agc-group">
+<label for="agc">AGC</label>
+<div class="switch">
+<input id="agc" type="checkbox" class="default-action" checked="checked">
+<label class="slider" for="agc"></label>
+</div>
+</div>
+<div class="input-group" id="gainceiling-group">
+<label for="gainceiling">Gain Ceiling</label>
+<div class="slider-container">
+<span class="range-min">2x</span>
+<input type="range" id="gainceiling" min="0" max="6" value="0" class="default-action" style="flex:1">
+<span class="range-max">128x</span>
+</div>
+</div>
+<div class="section-title">Processing</div>
+<div class="input-group" id="aec2-group">
+<label for="aec2">AEC DSP</label>
+<div class="switch">
+<input id="aec2" type="checkbox" class="default-action">
+<label class="slider" for="aec2"></label>
+</div>
+</div>
+<div class="input-group" id="ae_level-group">
+<label for="ae_level">AE Level</label>
+<div class="slider-container">
+<span class="range-min">-2</span>
+<input type="range" id="ae_level" min="-2" max="2" value="0" class="default-action">
+<span class="range-max">2</span>
+</div>
+</div>
+<div class="input-group" id="bpc-group">
+<label for="bpc">BPC</label>
+<div class="switch">
+<input id="bpc" type="checkbox" class="default-action">
+<label class="slider" for="bpc"></label>
+</div>
+</div>
+<div class="input-group" id="wpc-group">
+<label for="wpc">WPC</label>
+<div class="switch">
+<input id="wpc" type="checkbox" class="default-action" checked="checked">
+<label class="slider" for="wpc"></label>
+</div>
+</div>
+<div class="input-group" id="raw_gma-group">
+<label for="raw_gma">Raw GMA</label>
+<div class="switch">
+<input id="raw_gma" type="checkbox" class="default-action" checked="checked">
+<label class="slider" for="raw_gma"></label>
+</div>
+</div>
+<div class="input-group" id="lenc-group">
+<label for="lenc">Lens Correction</label>
+<div class="switch">
+<input id="lenc" type="checkbox" class="default-action" checked="checked">
+<label class="slider" for="lenc"></label>
+</div>
+</div>
+<div class="input-group" id="dcw-group">
+<label for="dcw">DCW</label>
+<div class="switch">
+<input id="dcw" type="checkbox" class="default-action" checked="checked">
+<label class="slider" for="dcw"></label>
+</div>
+</div>
+<div class="input-group" id="colorbar-group">
+<label for="colorbar">Test Pattern</label>
+<div class="switch">
+<input id="colorbar" type="checkbox" class="default-action">
+<label class="slider" for="colorbar"></label>
+</div>
+</div>
+<div class="section-title" id="flash-section-title">Flash LED</div>
+<div class="input-group" id="flash_master-group">
+<label for="flash_master">Manual Flashlight</label>
+<div class="switch">
+<input id="flash_master" type="checkbox">
+<label class="slider" for="flash_master"></label>
+</div>
+</div>
+</nav>
+</div>
+</div>
+</div>
+</div>
+</div>
 <script>
 document.addEventListener('DOMContentLoaded',function(){
 const baseHost=document.location.origin;
@@ -2338,45 +2342,6 @@ fetch(`${baseHost}/control?var=reset&val=1`).then(()=>{
 setTimeout(()=>{location.reload();},500);
 });
 };
-// Tab switching
-document.querySelectorAll('.tab-btn').forEach(btn=>{
-btn.onclick=()=>{
-document.querySelectorAll('.tab-btn').forEach(b=>b.classList.remove('active'));
-document.querySelectorAll('.tab-content').forEach(c=>c.classList.remove('active'));
-btn.classList.add('active');
-document.getElementById(btn.dataset.tab+'-tab').classList.add('active');
-};
-});
-// IP address copy
-const ipCopy=document.getElementById('ip-copy');
-if(ipCopy){
-ipCopy.onclick=()=>{
-const ip=document.getElementById('ip-value').textContent;
-navigator.clipboard.writeText(ip);
-const orig=ipCopy.textContent;
-ipCopy.textContent='Copied!';
-setTimeout(()=>{ipCopy.textContent=orig;},1500);
-};
-}
-// Mobile panel toggle
-const controlPanel=document.getElementById('control-panel');
-const mobileToggle=document.getElementById('mobile-toggle');
-const mobileBackdrop=document.getElementById('mobile-backdrop');
-if(window.innerWidth<=768){
-mobileToggle.style.display='flex';
-mobileToggle.onclick=()=>{
-controlPanel.classList.toggle('mobile-visible');
-mobileBackdrop.classList.toggle('visible');
-};
-mobileBackdrop.onclick=()=>{
-controlPanel.classList.remove('mobile-visible');
-mobileBackdrop.classList.remove('visible');
-};
-}
-// Load IP address
-fetch(`${baseHost}/status`).then(r=>r.json()).then(s=>{
-if(s.ip)document.getElementById('ip-value').textContent=s.ip;
-}).catch(e=>console.log('IP load failed',e));
 });
 </script>
 </body>

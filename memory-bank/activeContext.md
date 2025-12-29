@@ -3,7 +3,7 @@
 *Last updated: December 2025*
 
 ## Current Branch
-**`feature/battery-deep-sleep-optimizations`** - OTA gating & graceful MQTT disconnect (PR #10)
+**`feature/mqtt-trace-instrumentation`** - Ready for review and merge
 
 ## Recent Milestone Completed
 ✅ **ESP32-S3 Triple-Reset Detection Fixed** using NVS (Non-Volatile Storage)

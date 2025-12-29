@@ -67,6 +67,12 @@ See `camera_config.h` for ESP32-S3 pinout (under development).
 
 ## Software Setup
 
+### ⚠️ Important: Use Arduino CLI Build System
+
+**ESP32-S3 and newer deployments use the Arduino CLI build system** in the `surveillance-arduino/` directory. See [surveillance-arduino/README.md](../surveillance-arduino/README.md) for complete instructions.
+
+The PlatformIO build system below is for **legacy ESP32-CAM support only**.
+
 ### 1. Configuration
 
 Copy the example secrets file:
@@ -77,21 +83,27 @@ cp include/secrets.h.example include/secrets.h
 Edit `include/secrets.h` with your credentials:
 - WiFi SSID/password
 - MQTT broker address and credentials
-- Optional: InfluxDB, OTA password
+- Optional: OTA password
 
-### 2. Build and Upload
+### 2. Build and Upload (PlatformIO - ESP32-CAM Legacy)
 
 **For ESP32-CAM (AI-Thinker):**
 ```bash
 pio run -e esp32cam --target upload --upload-port /dev/ttyUSB0
 ```
 
-**For ESP32-S3 (WIP):**
+### 3. Deploy Web Interface (LittleFS)
+
+For **new ESP32-S3 deployments**, see `surveillance-arduino/UPLOAD_LITTLEFS.sh`:
+
 ```bash
-pio run -e esp32-s3-devkitc-1 --target upload
+# From surveillance-arduino/ directory
+./UPLOAD_LITTLEFS.sh /dev/ttyACM0 s3  # ESP32-S3
 ```
 
-### 3. Monitor Serial Output
+This deploys the dark-themed web interface with all camera settings.
+
+### 4. Monitor Serial Output
 
 **ESP32-CAM (74880 baud for boot messages):**
 ```bash
@@ -100,7 +112,8 @@ pio device monitor -e esp32cam --baud 74880
 
 **ESP32-S3:**
 ```bash
-pio device monitor -e esp32-s3-devkitc-1
+# From surveillance-arduino/ directory
+./bin/arduino-cli monitor -p /dev/ttyACM0 -c baudrate=115200
 ```
 
 ## Usage

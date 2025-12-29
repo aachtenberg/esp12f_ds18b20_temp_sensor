@@ -51,8 +51,8 @@
 #define DRD_TIMEOUT 10          // Seconds to wait for second reset
 #define DRD_ADDRESS 0           // RTC memory address (ESP8266) or EEPROM address (ESP32)
 
-// Create Double Reset Detector instance (initialized after filesystem mount)
-DoubleResetDetector* drd = nullptr;
+// Create Double Reset Detector instance (initialized in setup after filesystem mount)
+static DoubleResetDetector* drd = nullptr;
 
 // Device name storage
 char deviceName[40] = "Temp Sensor";  // Default name
@@ -813,6 +813,9 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
           updateTopicBase();
           saveDeviceName(deviceName);
 
+          // Ensure MQTT is connected before publishing configuration events
+          ensureMqttConnected();
+          
           if (oldName != String(newName)) {
             publishEvent("device_configured", "Name: '" + oldName + "' -> '" + String(newName) + "', SSID: " + WiFi.SSID() + ", IP: " + WiFi.localIP().toString(), "info");
           } else {
@@ -822,6 +825,8 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
         Serial.println("[WiFi] Configuration portal completed successfully");
       } else {
         Serial.println("[WiFi] Configuration portal timeout or cancelled");
+        // Ensure MQTT connection is valid before attempting to publish portal result
+        ensureMqttConnected();
         publishEvent("config_portal", "Configuration portal closed (timeout or cancel)", "warning");
       }
     }
@@ -1019,7 +1024,8 @@ void setup() {
   Serial.println("[POWER] CPU running at full speed - using deep sleep for power management");
 
   // Initialize Double Reset Detector (after filesystem mount)
-  drd = new DoubleResetDetector(DRD_TIMEOUT, DRD_ADDRESS);
+  static DoubleResetDetector drdInstance(DRD_TIMEOUT, DRD_ADDRESS);
+  drd = &drdInstance;
   Serial.println("[DRD] Double Reset Detector initialized");
 
   // Check for double reset IMMEDIATELY (before slow WiFi/MQTT setup)

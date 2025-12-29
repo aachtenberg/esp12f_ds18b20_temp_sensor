@@ -83,6 +83,6 @@ void initDisplay();
  * @param ipAddress IP address string (e.g., "192.168.1.100") or empty if not connected
  * @param batteryPercent Battery percentage (-1 if not available or not monitoring)
  */
-void updateDisplay(const char* tempC, const char* tempF, bool wifiConnected, const char* ipAddress, int batteryPercent = -1);
+void updateDisplay(const char* tempC, const char* tempF, bool wifiConnected, const char* ipAddress, int batteryPercent);
 
 #endif // DISPLAY_H
