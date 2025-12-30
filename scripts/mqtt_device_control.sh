@@ -49,6 +49,7 @@ ${GREEN}Options:${NC}
   -b, --broker <ip>    MQTT broker IP (default: $MQTT_BROKER)
   -d, --device <name>  Device name (default: $DEVICE_NAME)
   -r, --retry <count>  Maximum retry attempts (default: $MAX_ATTEMPTS)
+                        Use 0 for infinite retries
   -i, --interval <sec> Retry interval in seconds (default: $RETRY_INTERVAL)
   -h, --help          Show this help message
 
@@ -59,16 +60,22 @@ ${GREEN}Environment Variables:${NC}
 ${GREEN}Examples:${NC}
   # Enable deep sleep with 30 second interval
   $0 deepsleep 30
-  
+
   # Disable deep sleep (continuous operation with infinite retries)
   $0 disable-sleep
-  
+
+  # Restart device with infinite retries
+  $0 -r 0 restart
+
+  # Enable deep sleep with infinite retries
+  $0 -r 0 enable-sleep 60
+
   # Restart device
   $0 restart
-  
+
   # Request status from different device
   $0 -d Greenhouse status
-  
+
   # Monitor all topics
   $0 monitor
 
@@ -101,7 +108,7 @@ while [[ $# -gt 0 ]]; do
         -r|--retry)
             # Validate as integer to prevent command injection
             if ! [[ "$2" =~ ^[0-9]+$ ]]; then
-                echo "ERROR: --retry must be a positive integer"
+                echo "ERROR: --retry must be a non-negative integer (0 for infinite)"
                 exit 1
             fi
             MAX_ATTEMPTS="$2"
@@ -262,16 +269,24 @@ case "$COMMAND" in
             exit 1
         fi
         
+        # Determine if infinite retry mode
+        INFINITE_MODE="false"
+        if [ "$MAX_ATTEMPTS" -eq 0 ]; then
+            INFINITE_MODE="true"
+        fi
+
         if [ "$SECONDS" -eq 0 ]; then
             send_command "deepsleep 0" \
                          "deep_sleep_config.*disabled" \
                          "Deep sleep disabled" \
-                         "$EVENTS_TOPIC"
+                         "$EVENTS_TOPIC" \
+                         "$INFINITE_MODE"
         else
             send_command "deepsleep $SECONDS" \
                          "deep_sleep_config.*$SECONDS seconds" \
                          "Deep sleep enabled ($SECONDS seconds)" \
-                         "$EVENTS_TOPIC"
+                         "$EVENTS_TOPIC" \
+                         "$INFINITE_MODE"
         fi
         ;;
         
@@ -296,11 +311,18 @@ case "$COMMAND" in
             echo -e "${RED}Error: seconds must be between 1-3600${NC}"
             exit 1
         fi
-        
+
+        # Determine if infinite retry mode
+        INFINITE_MODE="false"
+        if [ "$MAX_ATTEMPTS" -eq 0 ]; then
+            INFINITE_MODE="true"
+        fi
+
         send_command "deepsleep $SECONDS" \
                      "deep_sleep_config.*$SECONDS seconds" \
                      "Deep sleep enabled ($SECONDS seconds)" \
-                     "$EVENTS_TOPIC"
+                     "$EVENTS_TOPIC" \
+                     "$INFINITE_MODE"
         ;;
         
     status)
@@ -319,17 +341,31 @@ case "$COMMAND" in
         ;;
         
     restart)
+        # Determine if infinite retry mode
+        INFINITE_MODE="false"
+        if [ "$MAX_ATTEMPTS" -eq 0 ]; then
+            INFINITE_MODE="true"
+        fi
+
         send_command "restart" \
                      "restart" \
                      "Device restarting" \
-                     "$EVENTS_TOPIC"
+                     "$EVENTS_TOPIC" \
+                     "$INFINITE_MODE"
         ;;
-        
+
     config)
+        # Determine if infinite retry mode
+        INFINITE_MODE="false"
+        if [ "$MAX_ATTEMPTS" -eq 0 ]; then
+            INFINITE_MODE="true"
+        fi
+
         send_command "config" \
                      "config" \
                      "Device resetting WiFI" \
-                     "$EVENTS_TOPIC"
+                     "$EVENTS_TOPIC" \
+                     "$INFINITE_MODE"
         ;;
         
     monitor)

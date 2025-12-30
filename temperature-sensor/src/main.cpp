@@ -1193,6 +1193,11 @@ void setup() {
     // Publish immediately
     bool publishSuccess = publishTemperature();
     publishStatus();
+    
+    // Allow MQTT client to transmit the status message before entering wait loop
+    delay(100);
+    mqttClient.loop();
+    delay(100);
 
     Serial.println();
     Serial.println("========================================");
