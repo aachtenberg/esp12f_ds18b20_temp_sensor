@@ -53,9 +53,11 @@ struct DeviceMetrics {
     unsigned int mqttPublishFailures;
     float batteryVoltage;
     int batteryPercent;
+    unsigned long lastSuccessfulMqttPublish;
     
     DeviceMetrics() : bootTime(0), wifiReconnects(0), sensorReadFailures(0),
-                      mqttPublishFailures(0), batteryVoltage(0.0f), batteryPercent(-1) {}
+                      mqttPublishFailures(0), batteryVoltage(0.0f), batteryPercent(-1),
+                      lastSuccessfulMqttPublish(0) {}
 };
 
 DeviceMetrics metrics;
@@ -303,14 +305,22 @@ void publishEvent(const String& eventType, const String& message, const String& 
 }
 
 bool publishReadings() {
+  if (!mqttClient.connected()) {
+    Serial.println("[MQTT] Not connected - skipping readings publish");
+    return false;
+  }
+  
   StaticJsonDocument<512> doc;
   doc["device"] = deviceName;
   doc["chip_id"] = chipId;
+  doc["firmware_version"] = getFirmwareVersion();
   doc["schema_version"] = 1;
   doc["timestamp"] = millis() / 1000;
+  doc["uptime_seconds"] = (millis() - metrics.bootTime) / 1000;
   doc["temperature_c"] = temperature_c;
   doc["humidity_rh"] = humidity_rh;
   doc["pressure_pa"] = pressure_pa;
+  doc["pressure_hpa"] = pressure_pa / 100.0;
   doc["altitude_m"] = altitude_m;
   
 #ifdef BATTERY_MONITOR_ENABLED
@@ -320,10 +330,21 @@ bool publishReadings() {
   }
 #endif
   
-  return publishJson(getTopicReadings(), doc, false);
+  bool success = publishJson(getTopicReadings(), doc, false);
+  if (success) {
+    Serial.printf("[MQTT] ✓ Published readings to %s\n", getTopicReadings().c_str());
+  } else {
+    Serial.printf("[MQTT] ✗ Failed to publish readings (state=%d)\n", mqttClient.state());
+    metrics.mqttPublishFailures++;
+  }
+  return success;
 }
 
 void publishStatus() {
+  if (!mqttClient.connected()) {
+    return;  // Silent - published by periodic health check
+  }
+  
   StaticJsonDocument<512> doc;
   doc["device"] = deviceName;
   doc["chip_id"] = chipId;
@@ -561,17 +582,46 @@ void loop() {
   
   // Periodic sensor reading and publish
   static unsigned long lastReadTime = 0;
-  if (millis() - lastReadTime > MQTT_PUBLISH_INTERVAL_MS) {
-    lastReadTime = millis();
+  static unsigned long lastStatusLog = 0;
+  
+  unsigned long now = millis();
+  
+  if (now - lastReadTime > MQTT_PUBLISH_INTERVAL_MS) {
+    lastReadTime = now;
     
     // Read sensor
     readSensorData();
     
-    // Publish data
-    if (ensureMqttConnected()) {
-      publishReadings();
+    // Publish data only if MQTT connected
+    if (mqttClient.connected()) {
+      bool readingsPublished = publishReadings();
       publishStatus();
+      
+      if (!readingsPublished) {
+        metrics.sensorReadFailures++;
+      }
+    } else {
+      Serial.println("[MQTT] Skipping publish - not connected to broker");
+      metrics.mqttPublishFailures++;
     }
+  }
+  
+  // Periodic status logging to serial (every 60 seconds)
+  if (now - lastStatusLog > 60000) {
+    lastStatusLog = now;
+    
+    Serial.printf("\n[STATUS] ====== Periodic Health Check ======\n");
+    Serial.printf("[STATUS] Uptime: %lus | Free Heap: %u bytes\n",
+                  (now - metrics.bootTime) / 1000, ESP.getFreeHeap());
+    Serial.printf("[STATUS] WiFi: %s (RSSI: %d dBm) | MQTT: %s\n",
+                  WiFi.isConnected() ? "✓" : "✗",
+                  WiFi.RSSI(),
+                  mqttClient.connected() ? "✓" : "✗");
+    Serial.printf("[STATUS] Sensor: Temp=%.1f°C Humidity=%.1f%% Pressure=%.0f hPa\n",
+                  temperature_c, humidity_rh, pressure_pa / 100.0);
+    Serial.printf("[STATUS] Failures: MQTT=%u | Sensor=%u | WiFi Reconnects=%u\n",
+                  metrics.mqttPublishFailures, metrics.sensorReadFailures, metrics.wifiReconnects);
+    Serial.printf("[STATUS] ======================================\n\n");
   }
   
   delay(10);
