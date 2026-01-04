@@ -37,7 +37,7 @@ Multi-device IoT monitoring platform for ESP32/ESP8266/ESP32-S3 with MQTT data p
 - **Docs**: [bme280-sensor/README.md](bme280-sensor/README.md)
 
 ### Surveillance Camera (Active - 3 Devices)
-- **Hardware**: ESP32-S3 + OV2640 camera + optional SD card
+- **Hardware**: 2× ESP32-CAM-MB (OV2640), 1× ESP32-S3 (OV3660)
 - **Features**: MQTT events, web stream, camera presets, motion detection
 - **Status**: ✅ Production - Indoor/outdoor monitoring
 - **Docs**: [surveillance/README.md](surveillance/README.md)
