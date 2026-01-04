@@ -12,7 +12,7 @@ Multi-device IoT monitoring platform for ESP32/ESP8266/ESP32-S3 with MQTT data p
 **🚀 Projects**
 - **[temperature-sensor/](temperature-sensor/)** - DS18B20 temperature monitoring (8 devices deployed)
 - **[bme280-sensor/](bme280-sensor/)** - BME280 environmental sensor (temperature, humidity, pressure)
-- **[surveillance/](surveillance/)** - ESP32-S3 camera monitoring (1 device deployed)
+- **[surveillance/](surveillance/)** - ESP32-S3 camera monitoring (3 devices deployed)
 - **[solar-monitor/](solar-monitor/)** - Victron solar system monitoring (1 device deployed)
 
 **🛠️ Hardware**
@@ -36,10 +36,10 @@ Multi-device IoT monitoring platform for ESP32/ESP8266/ESP32-S3 with MQTT data p
 - **Status**: 🔧 Testing - Ready for deployment
 - **Docs**: [bme280-sensor/README.md](bme280-sensor/README.md)
 
-### Surveillance Camera (Active - 1 Device)
+### Surveillance Camera (Active - 3 Devices)
 - **Hardware**: ESP32-S3 + OV2640 camera + optional SD card
 - **Features**: MQTT events, web stream, camera presets, motion detection
-- **Status**: ✅ Production - Indoor monitoring
+- **Status**: ✅ Production - Indoor/outdoor monitoring
 - **Docs**: [surveillance/README.md](surveillance/README.md)
 
 ### Solar Monitor (Active - 1 Device)
@@ -194,7 +194,7 @@ All devices use hierarchical topic structure:
 |---------|--------|---------|---------|-------------|
 | Temperature Sensor | ✅ Production | 8 | v1.0.8-v1.1.0 | Dec 24, 2025 |
 | BME280 Sensor | 🔧 Testing | 0 | v1.0.0 | Jan 3, 2026 |
-| Surveillance | ✅ Production | 1 | Active | Dec 2025 |
+| Surveillance | ✅ Production | 3 | Active | Dec 2025 |
 | Solar Monitor | ✅ Production | 1 | Active | Dec 2025 |
 
 ---
