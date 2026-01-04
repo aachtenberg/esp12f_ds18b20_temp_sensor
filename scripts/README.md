@@ -9,7 +9,7 @@ Helper scripts for building and flashing ESP devices.
 **`mqtt_device_control.sh`** - Comprehensive MQTT command interface for all ESP32 devices:
 
 ```bash
-cd /home/aachten/PlatformIO/esp12f_ds18b20_temp_sensor/scripts
+cd scripts
 
 # Enable deep sleep (30 second interval)
 ./mqtt_device_control.sh deepsleep 30
@@ -58,10 +58,37 @@ cd /home/aachten/PlatformIO/esp12f_ds18b20_temp_sensor/scripts
 - `-r, --retry <count>` - Maximum retry attempts (default: 15)
 - `-i, --interval <sec>` - Retry interval (default: 2)
 
-### Legacy Scripts
+## Security & Validation
 
-**`disable_sleep_mqtt.sh`** - Original deep sleep disable script (still functional)
-**`monitor_sleep_cycle.sh`** - Monitor device wake/sleep cycles via HTTP health endpoint
+### Pre-Push Secret Scanning
+
+**`pre-push-secrets.sh`** - Git pre-push hook to prevent committing secrets:
+
+```bash
+# Install as git hook
+cp scripts/pre-push-secrets.sh .git/hooks/pre-push
+chmod +x .git/hooks/pre-push
+```
+
+**What it checks:**
+- Tracked `secrets.h` files
+- Tracked `.env` files
+- Private key files
+- Credential patterns in committed files
+
+### Secrets Validation
+
+**`validate_secrets.sh`** - Validate secrets configuration before build:
+
+```bash
+cd scripts
+./validate_secrets.sh
+```
+
+**What it validates:**
+- `secrets.h` exists
+- `secrets.h` is properly gitignored
+- Required configuration constants are present
 
 ## Device Inventory Database Update
 
@@ -70,7 +97,7 @@ cd /home/aachten/PlatformIO/esp12f_ds18b20_temp_sensor/scripts
 Updates device information from `DEVICE_INVENTORY.md` to PostgreSQL database on raspberrypi2:
 
 ```bash
-cd /home/aachten/PlatformIO/esp12f_ds18b20_temp_sensor/scripts
+cd scripts
 
 # Install dependencies (once)
 pip3 install psycopg2-binary

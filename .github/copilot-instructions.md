@@ -576,6 +576,20 @@ pio run -e esp32dev -t upload
 **Implementation Date**: December 2025  
 **Status**: Active, required for all new builds
 
+### BME280 Sensor Project
+
+**Versioning**: Uses same update_version.sh script as temperature-sensor
+- Script location: `bme280-sensor/update_version.sh`
+- Version format: `MAJOR.MINOR.PATCH-buildYYYYMMDD`
+- Always run `./update_version.sh --patch` (or appropriate level) before deployment
+- Firmware includes I2C BME280 sensor on GPIO 8/9 (ESP32-S3)
+- MQTT topics: `esp-sensor-hub/bme280-sensor/` (readings, status, events, command)
+
+**Configuration**: 
+- Environment: esp32s3 (ESP32-S3-DevKitC-1-N8)
+- Sensors: BME280 (temperature, humidity, pressure, altitude)
+- Features: WiFiManager portal, MQTT publishing, OTA updates, health API
+- Deep sleep: Supported (same as temperature-sensor)
 
 ### Surveillance-arduino project - Arduino CLI Build
 

@@ -1,0 +1,8 @@
+.pio/
+.vscode/
+.platformio.ini.swp
+.env
+*.old
+*.backup
+ota_debug.log
+include/secrets.h

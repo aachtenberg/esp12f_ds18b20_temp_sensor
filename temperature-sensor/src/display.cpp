@@ -181,7 +181,7 @@ void initDisplay() {
     Serial.println("[OLED] Display disabled (OLED_ENABLED = 0)");
 }
 
-void updateDisplay(const char* tempC, const char* tempF, bool wifiConnected, const char* ipAddress) {
+void updateDisplay(const char* tempC, const char* tempF, bool wifiConnected, const char* ipAddress, int batteryPercent) {
     // Stub: Do nothing when display is disabled
 }
 

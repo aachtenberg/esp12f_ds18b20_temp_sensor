@@ -17,7 +17,6 @@ Streamlined documentation for the ESP multi-device IoT monitoring platform.
 
 ### Core Features
 - **[EVENT_LOGGING.md](EVENT_LOGGING.md)** - Device monitoring and event tracking system
-- **[CODE_STRUCTURE.md](architecture/CODE_STRUCTURE.md)** - Technical implementation details
 
 ### Hardware Projects  
 - **[PCB Design](pcb_design/)** - USB-powered temperature sensor board

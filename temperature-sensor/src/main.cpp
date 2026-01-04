@@ -44,7 +44,9 @@
 #endif
 #include "secrets.h"
 #include "device_config.h"
-#include "display.h"
+#ifdef OLED_ENABLED
+  #include "display.h"
+#endif
 #include "version.h"
 
 // Double Reset Detector configuration
@@ -1411,12 +1413,14 @@ void loop() {
   }
 
   // Update OLED display
-  if (millis() - lastDisplayUpdate >= 1000) {
-    bool wifiConnected = (WiFi.status() == WL_CONNECTED);
-    String ipStr = wifiConnected ? WiFi.localIP().toString() : "";
-    updateDisplay(temperatureC.c_str(), temperatureF.c_str(), wifiConnected, ipStr.c_str(), metrics.batteryPercent);
-    lastDisplayUpdate = millis();
-  }
+  #ifdef OLED_ENABLED
+    if (millis() - lastDisplayUpdate >= 1000) {
+      bool wifiConnected = (WiFi.status() == WL_CONNECTED);
+      String ipStr = wifiConnected ? WiFi.localIP().toString() : "";
+      updateDisplay(temperatureC.c_str(), temperatureF.c_str(), wifiConnected, ipStr.c_str(), metrics.batteryPercent);
+      lastDisplayUpdate = millis();
+    }
+  #endif
   
   // Handle OTA updates (only when deep sleep is disabled)
   // When deep sleep is enabled, device sleeps and OTA is unavailable

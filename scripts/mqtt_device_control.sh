@@ -41,7 +41,7 @@ ${GREEN}Commands:${NC}
 
   status               Request device status update
   
-  restart              Restart the device
+  restart              Restart the device (supports retry options)
   
   monitor              Monitor all device topics (temperature, status, events)
 
@@ -65,13 +65,13 @@ ${GREEN}Examples:${NC}
   $0 disable-sleep
 
   # Restart device with infinite retries
-  $0 -r 0 restart
+  $0 -d Spa -r 0 restart
 
   # Enable deep sleep with infinite retries
   $0 -r 0 enable-sleep 60
 
-  # Restart device
-  $0 restart
+  # Restart specific device
+  $0 -d Spa restart
 
   # Request status from different device
   $0 -d Greenhouse status

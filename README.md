@@ -2,302 +2,203 @@
 
 Multi-device IoT monitoring platform for ESP32/ESP8266/ESP32-S3 with MQTT data publishing, optional InfluxDB/Grafana integration, and WiFiManager configuration portal.
 
-## Table of Contents
-- [Overview](#overview)
-- [Device Inventory](#device-inventory)
-- [Quick Start](#quick-start)
-- [Surveillance Camera](#surveillance-camera)
-- [Temperature Sensor Project](#temperature-sensor-project)
-- [Solar Monitor Project](#solar-monitor-project)
-- [Configuration](#configuration)
-- [Secrets Hygiene](#secrets-hygiene)
-- [Architecture](#architecture)
-- [API Reference](#api-reference)
-- [Troubleshooting](#troubleshooting)
+## Quick Navigation
+
+**📖 Documentation**
+- **[PLATFORM_GUIDE.md](docs/reference/PLATFORM_GUIDE.md)** - Architecture, features, and platform overview
+- **[CONFIG.md](docs/reference/CONFIG.md)** - Configuration, deployment, and troubleshooting
+- **[DEVICE_INVENTORY.md](temperature-sensor/docs/DEVICE_INVENTORY.md)** - Device tracking and versions
+
+**🚀 Projects**
+- **[temperature-sensor/](temperature-sensor/)** - DS18B20 temperature monitoring (8 devices deployed)
+- **[bme280-sensor/](bme280-sensor/)** - BME280 environmental sensor (temperature, humidity, pressure)
+- **[surveillance/](surveillance/)** - ESP32-S3 camera monitoring (3 devices deployed)
+- **[solar-monitor/](solar-monitor/)** - Victron solar system monitoring (1 device deployed)
+
+**🛠️ Hardware**
+- **[Battery Setup Guide](docs/hardware/BATTERY_SETUP_GUIDE.md)** - TP4056 charger + battery wiring
+- **[OLED Display Guide](docs/hardware/OLED_DISPLAY_GUIDE.md)** - Optional display integration
+- **[PCB Design](docs/pcb_design/)** - USB-powered temperature sensor board
 
 ---
 
-## Overview
+## Projects Overview
 
-### Projects
+### Temperature Sensor (Active - 8 Devices)
+- **Hardware**: ESP8266/ESP32 + DS18B20 waterproof sensor
+- **Features**: MQTT, deep sleep, WiFiManager, optional OLED, OTA updates
+- **Status**: ✅ Production - 8 locations (v1.0.8-v1.1.0)
+- **Docs**: [temperature-sensor/README.md](temperature-sensor/README.md)
 
-**Temperature Sensor** (Active - 8 Devices Deployed)
-- **Hardware**: ESP8266/ESP32 + DS18B20 temperature sensor
-- **Transport**: MQTT JSON publishing to central broker
-- **Features**: WiFiManager portal config, deep sleep mode with smart WiFi retry, event logging, optional OLED display, OTA updates
-- **Status**: ✅ Production - 8 deployed locations (6 updated to v1.1.0, v1.1.1 ready)
+### BME280 Sensor (Development)
+- **Hardware**: ESP32/ESP32-S3 + BME280 I2C sensor
+- **Features**: Temperature, humidity, pressure, altitude calculation, MQTT
+- **Status**: 🔧 Testing - Ready for deployment
+- **Docs**: [bme280-sensor/README.md](bme280-sensor/README.md)
 
-**Surveillance Camera** (Active)
-- **Hardware**: ESP32-S3 + OV2640 camera + optional SD card
-- **Transport**: MQTT JSON publishing, web stream endpoint
-- **Features**: WiFiManager config, camera presets, SD card recording
-- **Status**: ✅ Production - Indoor monitoring
+### Surveillance Camera (Active - 3 Devices)
+- **Hardware**: 2× ESP32-CAM-MB (OV2640), 1× ESP32-S3 (OV3660)
+- **Features**: MQTT events, web stream, camera presets, motion detection
+- **Status**: ✅ Production - Indoor/outdoor monitoring
+- **Docs**: [surveillance/README.md](surveillance/README.md)
 
-**Solar Monitor** (Deployed)
-- **Hardware**: ESP32 + Victron SmartShunt + 2x SmartSolar MPPT controllers
-- **Transport**: MQTT JSON publishing
-- **Features**: Real-time solar monitoring, battery state tracking, VE.Direct protocol
-- **Status**: ✅ Production - Solar system monitoring
+### Solar Monitor (Active - 1 Device)
+- **Hardware**: ESP32 + Victron SmartShunt + 2× MPPT controllers
+- **Features**: Real-time monitoring, battery SOC, VE.Direct protocol, MQTT
+- **Status**: ✅ Production - Solar system tracking
+- **Docs**: [solar-monitor/README.md](solar-monitor/README.md)
 
 ---
 
-## Device Inventory
+## Quick Start
 
-**📋 [DEVICE_INVENTORY.md](DEVICE_INVENTORY.md)** - Complete device tracking and update status
+### 1. Clone and Setup Secrets
+```bash
+git clone https://github.com/aachtenberg/esp-sensor-hub.git
+cd esp-sensor-hub
 
-### Currently Deployed Devices (8 Total)
-- **Pump House** (ESP8266 @ 192.168.0.122) - v1.1.0, memory leak fixes
-- **Main Cottage** (ESP8266 @ 192.168.0.139) - v1.1.0, memory leak fixes
-- **Small Garage** (ESP32 @ 192.168.0.176) - v1.1.0, OLED display, memory leak fixes
-- **Spa** (ESP32 @ 192.168.0.196) - v1.1.0, memory leak + deep sleep fixes (ready for v1.1.1)
-- **Sauna** (ESP32 @ 192.168.0.135) - v1.1.0, memory leak + deep sleep fixes (ready for v1.1.1)
-- **Mobile Temp Sensor** (ESP8266) - v1.1.0, memory leak fixes
-- **Big Garage** (ESP32) - Pending update, MQTT active
-- **Temp Sensor** (Unknown platform) - Pending update, MQTT active
+# Setup secrets for your project (temperature-sensor example)
+cp temperature-sensor/include/secrets.h.example temperature-sensor/include/secrets.h
+nano temperature-sensor/include/secrets.h  # Edit MQTT_SERVER, OTA_PASSWORD
+```
 
-### Update Status (Dec 24, 2025)
-- ✅ **v1.1.1-build20251224** - Smart WiFi retry for deep sleep devices (ready to deploy)
-- ✅ **v1.1.0-build20251223** - Memory leak fixes deployed to 6 devices
-- ✅ **Critical fixes**: Smart WiFi retry prevents battery drain, DoubleResetDetector heap→stack, String→char[] conversions
-- ✅ **ESP32 deep sleep**: WiFi/MQTT disconnect + 2s command window fixes
-- ⏳ **2 devices pending**: Big Garage, Temp Sensor (require serial access)
+### 2. Build and Flash Device
+```bash
+cd temperature-sensor
 
-**Recent Critical Fixes**:
-- **v1.1.1 - Smart WiFi Retry**: Deep sleep devices retry WiFi 3x without starting captive portal, conserving battery on transient failures
-- **v1.1.0 - Memory leak elimination**: ~100+ bytes/boot saved (DoubleResetDetector stack allocation)
-- **v1.1.0 - Heap fragmentation fix**: String operations replaced with snprintf()
-- **v1.1.0 - ESP32 deep sleep**: Fixed wake-up and remote configuration via MQTT
-- **v1.0.3 - MQTT reconnection**: Simplified 12-hour timeout bug
-- **Platform support**: MQTT_MAX_PACKET_SIZE=2048 (ESP32), 512 (ESP8266)
+# Update firmware version before building
+./update_version.sh --patch
+
+# Initial USB flash (required once)
+pio run -e esp8266-serial -t upload --upload-port /dev/ttyUSB0
+
+# Monitor serial output
+pio device monitor
+```
+
+### 3. Configure WiFi
+1. Device creates access point on first boot
+2. Connect to AP (SSID shown in serial output)
+3. Open browser to `http://192.168.4.1`
+4. Enter WiFi credentials and device name
+5. Device connects and starts publishing to MQTT
+
+### 4. Subsequent OTA Updates
+```bash
+export PLATFORMIO_UPLOAD_FLAGS="--auth=YOUR_OTA_PASSWORD"
+pio run -e esp8266 -t upload --upload-port 192.168.0.X
+```
+
+**Detailed instructions**: See project-specific README files and [CONFIG.md](docs/reference/CONFIG.md)
 
 ---
 
 ## System Architecture
 
 ```
-Devices (Temperature/Solar/Camera)
+Devices (Temperature/BME280/Solar/Camera)
     ↓
-MQTT Broker (Mosquitto) on your network (default port 1883)
+MQTT Broker (Mosquitto) - Port 1883
     ↓
 ┌───────────────────────────────────────┐
-│      Raspberry Pi Infrastructure       │
+│      Optional Infrastructure           │
 ├───────────────────────────────────────┤
-│  Optional: Telegraf (MQTT → InfluxDB)  │
-│  Optional: InfluxDB 3.x (time-series)  │
-│  Optional: Grafana (visualization)     │
+│  • Telegraf (MQTT → InfluxDB bridge)   │
+│  • InfluxDB 3.x (time-series storage)  │
+│  • Grafana (visualization/alerts)      │
 └───────────────────────────────────────┘
 ```
 
-**Data Flow**: Devices → MQTT Broker → (Optional) InfluxDB → (Optional) Grafana
-
-### Key Features
-
-- **MQTT Transport**: Standardized JSON payloads, hierarchical topics, retained status messages
-- **WiFiManager Portal**: Zero hardcoded credentials - configure via captive portal
-- **Event Logging**: Device monitoring, boot tracking, error diagnostics  
-- **Flexible Backends**: Works standalone with MQTT, or integrate InfluxDB/Grafana
-- **Optional Displays**: OLED support for temperature and solar projects
-- **Multi-Platform**: Supports ESP8266, ESP32, and ESP32-S3
+**Key Features**:
+- **MQTT-First**: All devices publish JSON to MQTT broker
+- **WiFiManager**: Zero hardcoded credentials - captive portal configuration
+- **Event Logging**: Boot tracking, errors, configuration changes
+- **Multi-Platform**: ESP8266, ESP32, ESP32-S3 support
+- **Optional Backends**: Works standalone or with InfluxDB/Grafana
 
 ---
 
-## Quick Start
+## Hardware Requirements
 
-### 1. Setup MQTT Broker Configuration
-Create `temperature-sensor/include/secrets.h`:
-```bash
-cp temperature-sensor/include/secrets.h.example temperature-sensor/include/secrets.h
-# Edit with your MQTT broker host: MQTT_BROKER = "your.mqtt.broker.com"
-```
+### Temperature Sensor
+| Component | Specs | Notes |
+|-----------|-------|-------|
+| MCU | ESP8266 (NodeMCU) or ESP32 | 8 devices deployed |
+| Sensor | DS18B20 | 1-Wire digital temperature |
+| Display (optional) | SSD1306 OLED 128x64 | I2C interface |
+| Power | USB 5V or custom PCB | PCB design available |
 
-### 2. Flash Device
+### BME280 Sensor
+| Component | Specs | Notes |
+|-----------|-------|-------|
+| MCU | ESP32 or ESP32-S3 | I2C communication |
+| Sensor | BME280 | Temperature, humidity, pressure |
+| Display (optional) | SSD1306 OLED 128x64 | I2C interface |
+| Power | USB 5V or battery | Battery monitoring supported |
 
-**⚠️ Important**: Before flashing, verify build configuration and update firmware version:
-```bash
-# Check MQTT buffer sizes (critical for ESP32!)
-grep "MQTT_MAX_PACKET_SIZE" temperature-sensor/platformio.ini
-
-# Update firmware version timestamp  
-cd temperature-sensor && ./update_version.sh
-
-# Test compilation
-pio run -e esp32dev  # Use correct environment for your board
-```
-
-**Initial USB Flash (required once):**
-```bash
-# Temperature sensor (ESP8266/ESP32)
-cd temperature-sensor && pio run -e esp8266 -t upload --upload-port /dev/ttyUSB0
-
-# Or ESP32 with display:
-pio run -e esp32dev -t upload --upload-port /dev/ttyUSB0
-```
-
-**Future Updates via OTA (no USB cable needed):**
-```bash
-# After device is on WiFi, update by IP address
-pio run -e esp32dev -t upload --upload-port 192.168.0.XXX
-
-# OTA password required (set in secrets.h: OTA_PASSWORD)
-# Note: WSL2 users may need to temporarily disable Windows Firewall
-```
-
-**📖 For detailed build procedures and troubleshooting, see [docs/reference/CONFIG.md](docs/reference/CONFIG.md)**
-
-### 3. Configure via WiFiManager Portal
-1. Device creates AP "ESP-Setup" (no password)
-2. Connect to AP and open the WiFiManager captive portal page (shown after connecting)
-3. Select WiFi network and enter credentials + device name
-4. Device connects and starts publishing MQTT data
-
-### 4. Monitor Data
-```bash
-# View temperature stream
-mosquitto_sub -h your.mqtt.broker.com -t "esp-sensor-hub/+/temperature" -v
-
-# View retained status
-mosquitto_sub -h your.mqtt.broker.com -t "esp-sensor-hub/+/status" -R -v
-```
+**Battery Setup**: See [Battery Setup Guide](docs/hardware/BATTERY_SETUP_GUIDE.md) for TP4056 charger wiring
 
 ---
 
 ## Secrets Hygiene
 
-- Secrets files are gitignored: `**/secrets.h`, `.env*`, `*.key`, `*.pem`, `*.crt`.
-- Never commit real credentials; use the `*.example` templates and keep your local copies untracked.
-- **Automated scanning**: GitHub Actions runs [gitleaks](https://github.com/gitleaks/gitleaks) on every push and PR to detect secrets before they reach the public repo (see [`.github/workflows/secrets-check.yml`](.github/workflows/secrets-check.yml)).
-- Optional pre-push guard: install the secret scanner hook so pushes fail if secret-like files or private keys slip in:
+- Secrets files gitignored: `**/secrets.h`, `.env*`, `*.key`, `*.pem`
+- Never commit real credentials - use `*.example` templates
+- **Automated scanning**: GitHub Actions runs gitleaks on every push
+- **Pre-push hook**: Optional local secret scanner
   ```bash
-  cd $(git rev-parse --show-toplevel)
   ln -sf scripts/pre-push-secrets.sh .git/hooks/pre-push
   chmod +x scripts/pre-push-secrets.sh
   ```
-  The local hook checks for tracked `secrets.h`, `.env`, key files, and PEM blobs (private keys).
-
-### Hardware Requirements
-
-| Component | Specs | Notes |
-|-----------|-------|-------|
-| MCU | ESP8266 (NodeMCU) or ESP32 | 4 devices deployed |
-| Sensor | DS18B20 | 1-Wire digital temperature |
-| Display (optional) | SSD1306 OLED 128x64 | I2C interface |
-| Power | USB 5V or custom PCB | PCB design available |
-
-│  MPPT2: 2.6kWh │      │  device-ip     │
-### Wiring
-
-**DS18B20 Connection:**
-```
-ESP8266/ESP32 GPIO 4 → DS18B20 Data (with 4.7kΩ pullup to 3.3V)
-3.3V → DS18B20 VDD
-GND → DS18B20 GND
-```
-
-**OLED Display (Optional):**
-```
-static const char* INFLUXDB_URL = "http://your-pi:8086";
-D1 (GPIO 5) → SCL         GPIO 22 → SCL
-D2 (GPIO 4) → SDA         GPIO 21 → SDA
-3.3V → VCC                3.3V → VCC
-GND → GND                 GND → GND
-```
-
-**Battery Voltage Sensing (ESP32 only):**
-```
-Battery+ → 10kΩ → GPIO34 → 10kΩ → GND  (2:1 voltage divider)
-
-Notes:
-- Keep grounds common; divider targets 4.2V Li-Ion down to safe ADC range.
-- Firmware already reads GPIO34 when running on ESP32; no extra config needed.
-```
-
-### Features
-
-- **Deep Sleep Mode** (ESP32 only) - Battery-optimized with RTC timer wake cycles, MQTT remote configuration
-- Temperature monitoring in °C and °F via MQTT
-- **OTA firmware updates** - Update devices over WiFi without USB cable
-- MQTT JSON publishing every 30 seconds
-- Retained status messages with WiFi/heap info
-- Event logging (boot, WiFi, sensor errors)
-- Optional OLED display for local status
-- WiFi auto-reconnect with failure tracking
-- Serial logging for debugging
-- **Battery monitoring** (ESP32 only) - Voltage and percentage tracking for battery-powered deployments
-- **Remote configuration** via MQTT commands (deep sleep, status, restart)
-
-### MQTT Topics
-
-| Topic | Payload | Retained |
-|-------|---------|----------|
-| `esp-sensor-hub/{device}/temperature` | `{device, chip_id, timestamp, celsius, fahrenheit}` | No |
-| `esp-sensor-hub/{device}/status` | `{device, uptime, wifi_connected, rssi, free_heap, deep_sleep_seconds, ...}` | **Yes** |
-| `esp-sensor-hub/{device}/events` | `{event, severity, message, ...}` | No |
-| `esp-sensor-hub/{device}/command` | `deepsleep N`, `status`, `restart` | No |
-
-### OLED Display Content (When Enabled)
-
-```
-┌────────────────┐
-│  Small Garage  │
-│                │
-│    21.4°C      │
-│    70.5°F      │
-│                │
-│  WiFi: -63dBm  │
-│  Heap: 240KB   │
-└────────────────┘
-```
 
 ---
 
-## Surveillance Camera Project
+## MQTT Topics
 
-The ESP32-S3 camera firmware publishes motion detection and status events to MQTT. See [surveillance/README.md](surveillance/README.md) for setup, stream endpoints, and capture presets.
+All devices use hierarchical topic structure:
 
----
+**Temperature Sensor**: `esp-sensor-hub/{device-name}/`
+- `/temperature` - Temperature readings (°C, °F)
+- `/status` - Device status (retained)
+- `/events` - Boot, error, configuration events
+- `/command` - Remote commands (deepsleep, status, restart)
 
-## Solar Monitor Project
+**BME280 Sensor**: `esp-sensor-hub/{device-name}/`
+- `/readings` - Temperature, humidity, pressure, altitude
+- `/status` - Device status (retained)
+- `/events` - Device events
+- `/command` - Remote commands
 
-The ESP32 solar monitor publishes real-time solar metrics (voltage, current, power, battery state) from Victron equipment via MQTT. See [solar-monitor/README.md](solar-monitor/README.md) for hardware configuration and wiring instructions.
+**Solar Monitor**: `esp-solar-hub/{device-name}/`
+- `/status` - Solar metrics (voltage, current, power, SOC)
+- `/events` - Device events
+
+**Surveillance Camera**: `esp-camera/{device-name}/`
+- `/status` - Camera status and metrics
+- `/events` - Motion detection, configuration changes
 
 ---
 
 ## Documentation
 
-- **[PLATFORM_GUIDE.md](docs/reference/PLATFORM_GUIDE.md)** - Architecture overview, features, and platform design
-- **[CONFIG.md](docs/reference/CONFIG.md)** - Configuration, setup, and troubleshooting
-- **[OLED_DISPLAY_GUIDE.md](docs/hardware/OLED_DISPLAY_GUIDE.md)** - Optional display integration
-
----
-
-## Key Technologies
-
-| Component | Library | Version | Purpose |
-|-----------|---------|---------|---------|
-| WiFi Config | WiFiManager | 2.0.17 | Captive portal for credentials |
-| MQTT | PubSubClient | 2.8.0 | MQTT client for JSON publishing |
-| JSON | ArduinoJson | 7.4.2 | Payload serialization |
-| Temperature | DallasTemperature | 4.0.5 | DS18B20 sensor reading |
-| OneWire | OneWire | 2.3.8 | 1-Wire protocol |
-| Display | U8g2 | 2.36.15 | OLED driver (optional) |
-| Reset | ESP_DoubleResetDetector | 1.3.2 | Factory reset on double-reset (ESP8266) |
-| Reset (S3) | Preferences (NVS) | Built-in | Triple-reset detection for ESP32-S3 |
-| **OTA Updates** | **ArduinoOTA** | **2.0.0** | **Over-the-air firmware updates** |
+- **[PLATFORM_GUIDE.md](docs/reference/PLATFORM_GUIDE.md)** - Complete architecture and features
+- **[CONFIG.md](docs/reference/CONFIG.md)** - Setup, deployment, troubleshooting
+- **[DEVICE_INVENTORY.md](temperature-sensor/docs/DEVICE_INVENTORY.md)** - Deployed devices and versions
+- **Project READMEs**: See individual project directories for detailed documentation
 
 ---
 
 ## Project Status
 
-| Project | Status | Devices | Data Transport |
-|---------|--------|---------|-----------------|
-| Temperature Sensor | ✅ Production | 8 deployed (6 @ v1.1.0) | MQTT JSON |
-| Surveillance Camera | ✅ Production | 1 deployed | MQTT JSON + Web stream |
-| Solar Monitor | ✅ Production | 1 deployed | MQTT JSON |
-| Backend | ✅ Running | Raspberry Pi 4 | InfluxDB v3 (optional bridge) |
+| Project | Status | Devices | Version | Last Update |
+|---------|--------|---------|---------|-------------|
+| Temperature Sensor | ✅ Production | 8 | v1.0.8-v1.1.0 | Dec 24, 2025 |
+| BME280 Sensor | 🔧 Testing | 0 | v1.0.0 | Jan 3, 2026 |
+| Surveillance | ✅ Production | 3 | Active | Dec 2025 |
+| Solar Monitor | ✅ Production | 1 | Active | Dec 2025 |
 
 ---
 
-**Last Updated**: December 23, 2025
-**Current Version**: v1.1.0-build20251223 (Memory leak fixes, deep sleep improvements)
-**Current Branch**: feature/battery-deep-sleep-optimizations
-**Architecture**: MQTT-based data streaming with optional InfluxDB v3 integration
+**Repository**: [github.com/aachtenberg/esp-sensor-hub](https://github.com/aachtenberg/esp-sensor-hub)  
+**License**: See LICENSE file  
+**Last Updated**: January 3, 2026

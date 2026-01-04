@@ -2,15 +2,6 @@
 
 ## Quick Reference
 
-### Device Inventory
-- **Sauna**: 192.168.0.135 (ESP32, battery-powered, chip: 2805A50E72AC) - v1.0.9
-- **Spa**: 192.168.0.196 (ESP32, battery-powered, chip: 2805A50F6740) - v1.0.9
-- **Small Garage**: 192.168.0.176 (ESP32, mains-powered with OLED, chip: 3C61053ED814) - v1.0.9
-- **Pump House**: 192.168.0.122 (ESP8266, mains-powered, chip: D8F15B0E72A5) - v1.0.9
-- **Main Cottage**: 192.168.0.139 (ESP8266, mains-powered, chip: CC50E3F38243) - v1.0.9
-- **Mobile Temp Sensor**: 192.168.0.213 (ESP8266, mains-powered, chip: 60019455E004) - v1.0.9
-- **Battery Display Test**: 192.168.0.112 (ESP32, battery-powered with OLED, chip: TBD) - v1.0.11 ✅ OTA deployed 2025-12-28
-
 ### OTA Password
 - Defined in `temperature-sensor/include/secrets.h`
 - Current password: `<REDACTED>`
@@ -166,6 +157,28 @@ mosquitto_pub -h 192.168.0.167 -t "esp-sensor-hub/<DeviceName>/command" -m "stat
 2. Ensure `#ifdef ESP8266` blocks don't conflict with ESP32 code paths
 3. Verify LittleFS is available for ESP8266 core 2.7.1+
 
+### Brownout Detector Triggered
+**Symptom**: Device repeatedly resets with "Brownout detector was triggered" message in serial output
+
+**Root Causes**:
+1. **Hardware defect**: Weak voltage regulator or insufficient decoupling capacitors on ESP32 module
+2. **Power supply issue**: Weak USB port, bad cable, or dying battery
+3. **High current draw**: WiFi initialization draws 250-400mA burst current
+
+**Diagnosis**:
+1. Test with different ESP32 module - if new module works, original has hardware defect
+2. Add 470µF capacitor across VCC/GND near ESP32 power pins
+3. Try different USB cable/port or use external 3.3V power supply
+4. Check voltage regulator (AMS1117 or similar) for proper operation
+
+**Serial Flash Workaround**:
+If device is in brownout reset loop and OTA is impossible, use serial flash environment:
+```bash
+pio run -e esp32dev-battery-display-serial -t upload --upload-port /dev/ttyUSB0
+```
+
+The `esp32dev-battery-display-serial` environment uses `upload_protocol = esptool` for USB serial flashing instead of OTA.
+
 ## Memory Optimization
 
 ### After Tracing Removal (v1.0.9)
@@ -175,6 +188,10 @@ mosquitto_pub -h 192.168.0.167 -t "esp-sensor-hub/<DeviceName>/command" -m "stat
 - Reduced String operations and heap fragmentation
 
 ## Version History
+- **v1.0.13** (2025-12-30): Serial flash environment for brownout troubleshooting
+  - Added `esp32dev-battery-display-serial` environment with `OLED_ENABLED=0` for serial USB flashing
+  - Fixed Spa device brownout reset loop by replacing faulty ESP32 module
+  - Documented brownout detector troubleshooting steps
 - **v1.0.9** (2025-12-24): Fixed double-reset detection, removed tracing, library dependency cleanup
   - DRD now works: check moved early in setup() before WiFi/MQTT init
   - DRD storage configured: ESP32=SPIFFS, ESP8266=LittleFS

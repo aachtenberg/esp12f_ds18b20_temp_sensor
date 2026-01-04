@@ -34,6 +34,7 @@ static const unsigned long TEMPERATURE_READ_INTERVAL_MS = 30000;  // Read temper
 // =============================================================================
 // Uncomment to enable battery voltage monitoring (ESP32 only)
 // Requires voltage divider on GPIO 34: Battery+ -> 10K -> GPIO34 -> 10K -> GND
+// Complete battery setup with TP4056 charger: see docs/hardware/BATTERY_SETUP_GUIDE.md
 // #define BATTERY_MONITOR_ENABLED
 
 // Only enable battery monitoring on ESP32
