@@ -4,7 +4,7 @@
 
 ### OTA Password
 - Defined in `temperature-sensor/include/secrets.h`
-- Current password: `<REDACTED>`
+- Set via environment variable when uploading (do not commit)
 
 ## Deployment Process
 
@@ -26,15 +26,15 @@ pio run -e esp8266             # For ESP8266 devices (Pump House, Main Cottage, 
 ### 3. Flash via OTA
 ```bash
 # For battery-powered ESP32 (Sauna, Spa)
-export PLATFORMIO_UPLOAD_FLAGS="--auth=<REDACTED>"
+export PLATFORMIO_UPLOAD_FLAGS="--auth=<OTA_PASSWORD>"
 pio run -e esp32dev-battery -t upload --upload-port <IP_ADDRESS>
 
 # For Small Garage (ESP32 with OLED)
-export PLATFORMIO_UPLOAD_FLAGS="--auth=<REDACTED>"
+export PLATFORMIO_UPLOAD_FLAGS="--auth=<OTA_PASSWORD>"
 pio run -e esp32-small-garage -t upload --upload-port <IP_ADDRESS>
 
 # For ESP8266 devices (Pump House, Main Cottage, Mobile Temp Sensor)
-export PLATFORMIO_UPLOAD_FLAGS="--auth=<REDACTED>"
+export PLATFORMIO_UPLOAD_FLAGS="--auth=<OTA_PASSWORD>"
 pio run -e esp8266 -t upload --upload-port <IP_ADDRESS>
 ```
 
@@ -133,7 +133,7 @@ mosquitto_pub -h 192.168.0.167 -t "esp-sensor-hub/<DeviceName>/command" -m "stat
 
 ### OTA Authentication Fails
 1. Verify OTA password matches `secrets.h`
-2. Ensure environment variable is set: `export PLATFORMIO_UPLOAD_FLAGS="--auth=<REDACTED>"`
+2. Ensure environment variable is set: `export PLATFORMIO_UPLOAD_FLAGS="--auth=<OTA_PASSWORD>"`
 3. Check device is not in deep sleep (wake it or disable deep sleep via MQTT)
 
 ### Device Not Responding

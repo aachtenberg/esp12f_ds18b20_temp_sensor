@@ -253,6 +253,9 @@ cd scripts
 # Configure deep sleep interval (0-3600 seconds)
 mosquitto_pub -h BROKER -t "esp-sensor-hub/DEVICE/command" -m "deepsleep 30"
 
+# Configure sensor reading interval (5-3600 seconds)
+mosquitto_pub -h BROKER -t "esp-sensor-hub/DEVICE/command" -m "interval 60"
+
 # Request status update
 mosquitto_pub -h BROKER -t "esp-sensor-hub/DEVICE/command" -m "status"
 

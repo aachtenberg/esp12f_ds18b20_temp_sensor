@@ -94,6 +94,10 @@ int deepSleepSeconds = 0;  // Default disabled
 volatile bool otaInProgress = false;  // Tracks active OTA upload to prevent sleep during transfer
 const char* DEEP_SLEEP_FILE = "/deep_sleep_seconds.txt";
 
+// Sensor reading interval configuration (seconds)
+int sensorIntervalSeconds = 30;  // Default 30 seconds
+const char* SENSOR_INTERVAL_FILE = "/sensor_interval.txt";
+
 // Data wire is connected to GPIO 4
 OneWire oneWire(ONE_WIRE_PIN);
 
@@ -248,6 +252,55 @@ void saveDeepSleepConfig() {
     Serial.printf("[DEEP SLEEP] Saved config: %d seconds\n", deepSleepSeconds);
   } else {
     Serial.println("[DEEP SLEEP] Failed to save config file");
+  }
+}
+
+// Load sensor interval config from filesystem
+void loadSensorIntervalConfig() {
+#ifdef ESP32
+  if (!SPIFFS.exists(SENSOR_INTERVAL_FILE)) {
+#else
+  if (!LittleFS.exists(SENSOR_INTERVAL_FILE)) {
+#endif
+    sensorIntervalSeconds = 30;
+    return;
+  }
+  
+#ifdef ESP32
+  File file = SPIFFS.open(SENSOR_INTERVAL_FILE, "r");
+#else
+  File file = LittleFS.open(SENSOR_INTERVAL_FILE, "r");
+#endif
+
+  if (!file) {
+    sensorIntervalSeconds = 30;
+    return;
+  }
+  
+  if (file.available()) {
+    sensorIntervalSeconds = file.readStringUntil('\n').toInt();
+    if (sensorIntervalSeconds < 5) sensorIntervalSeconds = 5;
+    Serial.printf("[SENSOR] Loaded interval config: %d seconds\n", sensorIntervalSeconds);
+  } else {
+    sensorIntervalSeconds = 30;
+  }
+  file.close();
+}
+
+// Save sensor interval config to filesystem
+void saveSensorIntervalConfig() {
+#ifdef ESP32
+  if (!SPIFFS.begin(true)) return;
+  File file = SPIFFS.open(SENSOR_INTERVAL_FILE, "w");
+#else
+  if (!LittleFS.begin()) return;
+  File file = LittleFS.open(SENSOR_INTERVAL_FILE, "w");
+#endif
+  
+  if (file) {
+    file.println(sensorIntervalSeconds);
+    file.close();
+    Serial.printf("[SENSOR] Saved interval config: %d seconds\n", sensorIntervalSeconds);
   }
 }
 
@@ -565,6 +618,7 @@ void publishStatus() {
   doc["sensor_read_failures"] = metrics.sensorReadFailures;
   doc["deep_sleep_enabled"] = (deepSleepSeconds > 0);
   doc["deep_sleep_seconds"] = deepSleepSeconds;
+  doc["sensor_interval_seconds"] = sensorIntervalSeconds;
   #ifdef BATTERY_MONITOR_ENABLED
     if (metrics.batteryPercent >= 0) {
       doc["battery_voltage"] = metrics.batteryVoltage;
@@ -777,6 +831,51 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
       publishEvent("device_restart", "Restarting device via MQTT command", "warning");
       delay(500);
       ESP.restart();
+    } else if (strncmp(payloadStr, "interval ", 9) == 0) {
+      // Format: "interval 60" for 60 seconds between readings
+      int newSeconds = atoi(payloadStr + 9);
+      
+      if (newSeconds >= 5 && newSeconds <= 3600) {  // 5 seconds to 1 hour
+        sensorIntervalSeconds = newSeconds;
+        saveSensorIntervalConfig();
+        
+        char msg[80];
+        snprintf(msg, sizeof(msg), "Sensor reading interval set to %d seconds via MQTT", newSeconds);
+        publishEvent("sensor_interval_config", msg, "info");
+        Serial.printf("[SENSOR] Interval updated: %d seconds\n", newSeconds);
+        publishStatus();
+      } else {
+        publishEvent("command_error", "Invalid interval value (must be 5-3600 seconds)", "error");
+        Serial.printf("[MQTT] Invalid interval value: %d (must be 5-3600)\n", newSeconds);
+      }
+    } else if (strncmp(payloadStr, "setname ", 8) == 0) {
+      // Extract new name from command (format: "setname <new_name>")
+      const char* newName = payloadStr + 8; // Skip "setname "
+      if (strlen(newName) > 0 && strlen(newName) < 40) {
+        String oldName = String(deviceName);
+        String oldTopicBase = topicBase;
+        
+        // Update device name
+        strcpy(deviceName, newName);
+        updateTopicBase();
+        saveDeviceName(deviceName);
+        
+        // Publish event on OLD topic so subscribers see the change
+        publishEvent("device_rename", "Device renamed from '" + oldName + "' to '" + String(newName) + "'", "info");
+        
+        // Reconnect MQTT with new topics
+        mqttClient.disconnect();
+        delay(100);
+        ensureMqttConnected();
+        
+        // Publish event on NEW topic to confirm
+        publishEvent("device_rename_complete", "Device now operating as '" + String(newName) + "'", "info");
+        publishStatus();
+        
+        Serial.printf("[MQTT] Device renamed: '%s' -> '%s'\n", oldName.c_str(), newName);
+      } else {
+        publishEvent("command_error", "Invalid device name (must be 1-39 characters)", "error");
+      }
     } else if (strcmp(payloadStr, "config") == 0 || strcmp(payloadStr, "portal") == 0) {
       publishEvent("config_portal", "Starting WiFi configuration portal via MQTT command", "warning");
       delay(500);
@@ -807,7 +906,9 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
       });
 
       if (wm.startConfigPortal(apName.c_str())) {
-        drd->stop();  // Clear double-reset flag after successful config
+        if (drd != nullptr) {
+          drd->stop();  // Clear double-reset flag after successful config
+        }
         if (shouldSaveConfig) {
           const char* newName = custom_device_name.getValue();
           String oldName = String(deviceName);
@@ -907,7 +1008,9 @@ void setupWiFi() {
     });
 
     if (wm.autoConnect(apName.c_str())) {
-      drd->stop();  // Clear double-reset flag after successful connection
+      if (drd != nullptr) {
+        drd->stop();  // Clear double-reset flag after successful connection
+      }
       if (shouldSaveConfig) {
         const char* newName = custom_device_name.getValue();
         strcpy(deviceName, newName);
@@ -1007,17 +1110,22 @@ void setup() {
   delay(1000);
 
   // Mount filesystem FIRST - required for DoubleResetDetector and config files
+  bool filesystemMounted = false;
 #ifdef ESP32
   if (!SPIFFS.begin(true)) {
     Serial.println("[FS] CRITICAL: Failed to mount SPIFFS");
+    Serial.println("[DRD] WARNING: Double Reset Detector will not function without filesystem");
   } else {
     Serial.println("[FS] SPIFFS mounted successfully");
+    filesystemMounted = true;
   }
 #else
   if (!LittleFS.begin()) {
     Serial.println("[FS] CRITICAL: Failed to mount LittleFS");
+    Serial.println("[DRD] WARNING: Double Reset Detector will not function without filesystem");
   } else {
     Serial.println("[FS] LittleFS mounted successfully");
+    filesystemMounted = true;
   }
 #endif
 
@@ -1025,14 +1133,19 @@ void setup() {
   // Reducing CPU frequency can cause timing issues and slow OTA transfers
   Serial.println("[POWER] CPU running at full speed - using deep sleep for power management");
 
-  // Initialize Double Reset Detector (after filesystem mount)
-  static DoubleResetDetector drdInstance(DRD_TIMEOUT, DRD_ADDRESS);
-  drd = &drdInstance;
-  Serial.println("[DRD] Double Reset Detector initialized");
+  // Initialize Double Reset Detector (only if filesystem is available)
+  if (filesystemMounted) {
+    static DoubleResetDetector drdInstance(DRD_TIMEOUT, DRD_ADDRESS);
+    drd = &drdInstance;
+    Serial.println("[DRD] Double Reset Detector initialized");
+  } else {
+    drd = nullptr;
+    Serial.println("[DRD] Double Reset Detector disabled - filesystem unavailable");
+  }
 
   // Check for double reset IMMEDIATELY (before slow WiFi/MQTT setup)
   // This must happen within the DRD timeout window
-  if (drd->detectDoubleReset()) {
+  if (drd != nullptr && drd->detectDoubleReset()) {
     Serial.println();
     Serial.println("========================================");
     Serial.println("  DOUBLE RESET DETECTED");
@@ -1062,7 +1175,9 @@ void setup() {
     });
 
     if (wm.startConfigPortal(apName.c_str())) {
-      drd->stop();  // Clear double-reset flag after successful config
+      if (drd != nullptr) {
+        drd->stop();  // Clear double-reset flag after successful config
+      }
       if (shouldSaveConfig) {
         const char* newName = custom_device_name.getValue();
         strcpy(deviceName, newName);
@@ -1077,7 +1192,9 @@ void setup() {
     } else {
       Serial.println("[WiFi] Configuration portal timeout or cancelled");
       Serial.println("[WiFi] Continuing with existing configuration...");
-      drd->stop();  // Clear flag even if portal was cancelled
+      if (drd != nullptr) {
+        drd->stop();  // Clear flag even if portal was cancelled
+      }
     }
   }
 
@@ -1103,6 +1220,7 @@ void setup() {
 
   // Load deep sleep configuration
   loadDeepSleepConfig();
+  loadSensorIntervalConfig();
 
   // Check if this was a wake from deep sleep or a manual reset
   #ifdef ESP32
@@ -1146,6 +1264,10 @@ void setup() {
 
   chipId = generateChipId();
   updateTopicBase();
+  
+  Serial.printf("[DEEP SLEEP] Config: %d seconds\n", deepSleepSeconds);
+  Serial.printf("[SENSOR] Interval: %d seconds\n", sensorIntervalSeconds);
+  
   mqttClient.setServer(MQTT_BROKER, MQTT_PORT);
 #ifdef ESP32
   mqttClient.setBufferSize(2048);  // Larger buffer for ESP32 (recommended when battery monitoring enabled)
@@ -1264,8 +1386,10 @@ void setup() {
 }
 
 void loop() {
-  // Must call drd->loop() to keep double reset detection working
-  drd->loop();
+  // Must call drd->loop() to keep double reset detection working (if available)
+  if (drd != nullptr) {
+    drd->loop();
+  }
 
   // Handle web requests first for responsiveness
   #if HTTP_SERVER_ENABLED
@@ -1341,7 +1465,8 @@ void loop() {
   }
 
   // Periodic temperature reading and MQTT publish
-  if ((now - lastPublishTime) > publishIntervalMs) {
+  unsigned long intervalMs = sensorIntervalSeconds * 1000UL;
+  if ((now - lastPublishTime) > intervalMs) {
     #ifdef ESP8266
       // Check heap before operations
       uint32_t freeHeap = ESP.getFreeHeap();

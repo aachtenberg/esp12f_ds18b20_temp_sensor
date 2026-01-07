@@ -67,7 +67,7 @@ else
 fi
 
 # Check for common mistakes
-if grep -q '<REDACTED>\|example\|password123' "$SECRETS_FILE"; then
+if grep -q 'example\|password123\|changeme' "$SECRETS_FILE"; then
     echo "⚠️  Warning: Found common example values. Make sure these are your actual credentials."
 fi
 

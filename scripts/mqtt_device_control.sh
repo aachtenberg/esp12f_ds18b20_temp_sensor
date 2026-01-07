@@ -40,6 +40,9 @@ ${GREEN}Commands:${NC}
   enable-sleep <secs>   Shortcut to enable deep sleep
                         Example: $0 enable-sleep 30
 
+  interval <seconds>    Configure sensor reading interval (5-3600 seconds)
+                        Example: $0 interval 60
+
   status               Request device status update
   
   restart              Restart the device (supports retry options)
@@ -61,6 +64,9 @@ ${GREEN}Environment Variables:${NC}
 ${GREEN}Examples:${NC}
   # Enable deep sleep with 30 second interval
   $0 deepsleep 30
+
+  # Set sensor reading interval to 60 seconds
+  $0 interval 60
 
   # Disable deep sleep (continuous operation with infinite retries)
   $0 disable-sleep
@@ -125,7 +131,7 @@ while [[ $# -gt 0 ]]; do
             RETRY_INTERVAL="$2"
             shift 2
             ;;
-        deepsleep|disable-sleep|enable-sleep|status|restart|monitor|config)
+        deepsleep|disable-sleep|enable-sleep|interval|status|restart|monitor|config)
             COMMAND="$1"
             shift
             # Collect remaining args (non-option arguments)
@@ -323,6 +329,39 @@ case "$COMMAND" in
         send_command "deepsleep $SECONDS" \
                      "deep_sleep_config.*$SECONDS seconds" \
                      "Deep sleep enabled ($SECONDS seconds)" \
+                     "$EVENTS_TOPIC" \
+                     "$INFINITE_MODE"
+        ;;
+        
+    interval)
+        if [ ${#ARGS[@]} -eq 0 ]; then
+            echo -e "${RED}Error: interval requires seconds argument (5-3600)${NC}"
+            echo "Example: $0 interval 60"
+            exit 1
+        fi
+        
+        SECONDS="${ARGS[0]}"
+        
+        # Validate seconds
+        if ! [[ "$SECONDS" =~ ^[0-9]+$ ]]; then
+            echo -e "${RED}Error: seconds must be a number${NC}"
+            exit 1
+        fi
+        
+        if [ "$SECONDS" -lt 5 ] || [ "$SECONDS" -gt 3600 ]; then
+            echo -e "${RED}Error: seconds must be between 5-3600${NC}"
+            exit 1
+        fi
+        
+        # Determine if infinite retry mode
+        INFINITE_MODE="false"
+        if [ "$MAX_ATTEMPTS" -eq 0 ]; then
+            INFINITE_MODE="true"
+        fi
+
+        send_command "interval $SECONDS" \
+                     "sensor_interval_config.*$SECONDS seconds" \
+                     "Sensor interval set to $SECONDS seconds" \
                      "$EVENTS_TOPIC" \
                      "$INFINITE_MODE"
         ;;

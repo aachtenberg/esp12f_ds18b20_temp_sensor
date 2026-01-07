@@ -2751,6 +2751,7 @@ public:
         if (!_fb) {
             _fb = capturePhoto();
             if (!_fb) {
+                Serial.println("[Stream] capturePhoto() failed in _fillBuffer (retrying...)");
                 return RESPONSE_TRY_AGAIN;
             }
             _index = 0;
