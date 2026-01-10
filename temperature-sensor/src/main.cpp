@@ -1373,6 +1373,25 @@ void setup() {
   if (deepSleepSeconds > 0) {
     Serial.println("[DEEP SLEEP] Deep sleep mode enabled - publishing and waiting for commands");
 
+    // Wait for WiFi to connect after deep sleep wake (max 10 seconds)
+    Serial.println("[DEEP SLEEP] Waiting for WiFi connection...");
+    unsigned long wifiWaitStart = millis();
+    while (WiFi.status() != WL_CONNECTED && (millis() - wifiWaitStart) < 10000) {
+      delay(100);
+      if ((millis() - wifiWaitStart) % 1000 == 0) {
+        Serial.print(".");
+      }
+    }
+    Serial.println();
+    
+    if (WiFi.status() != WL_CONNECTED) {
+      Serial.println("[DEEP SLEEP] WiFi connection failed after 10s - staying awake to retry");
+      lastPublishTime = millis();
+      return;
+    }
+    Serial.printf("[DEEP SLEEP] WiFi connected to %s (IP: %s, RSSI: %d dBm)\n", 
+                  WiFi.SSID().c_str(), WiFi.localIP().toString().c_str(), WiFi.RSSI());
+
     // Ensure MQTT is connected before publishing
     if (!ensureMqttConnected()) {
       Serial.println("[DEEP SLEEP] MQTT connection failed - staying awake to retry");
