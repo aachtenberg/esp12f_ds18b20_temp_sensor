@@ -696,12 +696,15 @@ void checkResetCounter() {
   }
 
   Serial.printf("[RESET] Boot reason: %s\n", configPortalReason);
+  resetPrefs.end();  // Close NVS namespace to free resources
 }
 
 void clearCrashLoop() {
   // Called after successful boot (WiFi + sensors + web server initialized)
+  resetPrefs.begin("reset", false);  // Open NVS namespace
   resetPrefs.putUInt("crash_flag", 0);
   resetPrefs.putUInt("crash_cnt", 0);
+  resetPrefs.end();  // Close NVS namespace
   Serial.println("[RESET] Crash loop flag cleared - boot successful");
 }
 #endif
