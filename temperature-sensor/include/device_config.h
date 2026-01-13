@@ -22,6 +22,15 @@ static const int ONE_WIRE_PIN = 4;
 // Timing constants
 static const unsigned long WIFI_CHECK_INTERVAL_MS = 15000;    // Check WiFi connection every 15s
 static const unsigned long TEMPERATURE_READ_INTERVAL_MS = 30000;  // Read temperature every 30s
+
+// WiFi mesh roaming configuration
+static const int WIFI_CONSECUTIVE_MQTT_FAILURE_THRESHOLD = 5;     // Force reconnect after 5 consecutive MQTT failures
+static const int WIFI_RSSI_POOR_THRESHOLD = -85;                  // Consider signal poor below -85 dBm
+static const unsigned long WIFI_FORCED_RECONNECT_COOLDOWN_MS = 300000;  // 5 min minimum between forced reconnects
+static const int WIFI_MAX_RECONNECTS_PER_HOUR = 6;                // Max 6 forced reconnects per hour (emergency brake)
+static const unsigned long WIFI_RECONNECT_HISTORY_WINDOW_MS = 3600000;  // 1 hour rolling window
+static const unsigned long WIFI_PERIODIC_RECONNECT_INTERVAL_MS = 86400000;  // Force reconnect every 24 hours
+
 // HTTP timeout: ESP8266 needs shorter timeout to prevent watchdog resets
 #ifdef ESP8266
   static const int HTTP_TIMEOUT_MS = 5000;   // 5s timeout for ESP8266

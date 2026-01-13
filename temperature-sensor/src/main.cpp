@@ -59,12 +59,23 @@ struct DeviceMetrics {
     unsigned long lastSuccessfulMqttPublish;
   float batteryVoltage;
   int batteryPercent;
+  
+    // WiFi mesh roaming tracking
+    unsigned int consecutiveMqttFailures;        // Track consecutive MQTT failures
+    unsigned long lastForcedWifiReconnect;       // Timestamp of last forced reconnect
+    unsigned long wifiReconnectTimestamps[10];   // Rolling window of last 10 reconnect times
+    int wifiReconnectIndex;                      // Circular buffer index
+    unsigned long lastPeriodicReconnect;         // Last 24h periodic reconnect
 
     DeviceMetrics() : bootTime(0), wifiReconnects(0), sensorReadFailures(0),
                       mqttPublishFailures(0),
                       minTempC(999.0f), maxTempC(-999.0f),
             lastSuccessfulMqttPublish(0),
-            batteryVoltage(0.0f), batteryPercent(-1) {}
+            batteryVoltage(0.0f), batteryPercent(-1),
+            consecutiveMqttFailures(0), lastForcedWifiReconnect(0),
+            wifiReconnectIndex(0), lastPeriodicReconnect(0) {
+        for (int i = 0; i < 10; i++) wifiReconnectTimestamps[i] = 0;
+    }
 
     void updateTemperature(float tempC) {
         if (tempC > -100.0f && tempC < 100.0f) {
@@ -443,7 +454,117 @@ const char* getMqttStateString(int state) {
   }
 }
 
+// Check if we're reconnecting too frequently (prevent infinite loops)
+bool isWifiReconnectRateLimited() {
+  unsigned long now = millis();
+  
+  // Cooldown: minimum 5 minutes between forced reconnects
+  if (metrics.lastForcedWifiReconnect > 0 && 
+      (now - metrics.lastForcedWifiReconnect) < WIFI_FORCED_RECONNECT_COOLDOWN_MS) {
+    return true;
+  }
+  
+  // Emergency brake: count reconnects in last hour
+  int reconnectsInLastHour = 0;
+  for (int i = 0; i < 10; i++) {
+    if (metrics.wifiReconnectTimestamps[i] > 0 &&
+        (now - metrics.wifiReconnectTimestamps[i]) < WIFI_RECONNECT_HISTORY_WINDOW_MS) {
+      reconnectsInLastHour++;
+    }
+  }
+  
+  if (reconnectsInLastHour >= WIFI_MAX_RECONNECTS_PER_HOUR) {
+    Serial.printf("[WiFi] EMERGENCY BRAKE: %d reconnects in last hour, throttling\n", reconnectsInLastHour);
+    publishEvent("wifi_reconnect_throttle", 
+                 "Too many reconnects (" + String(reconnectsInLastHour) + "/hour), throttling to prevent loop",
+                 "error");
+    return true;
+  }
+  
+  return false;
+}
+
+// Force WiFi reconnect to try different mesh node
+void forceWifiReconnect(const String& reason) {
+  unsigned long now = millis();
+  
+  Serial.printf("[WiFi] Forcing reconnect: %s\n", reason.c_str());
+  publishEvent("wifi_forced_reconnect", "Reason: " + reason, "warning");
+  
+  // Track reconnect in circular buffer
+  metrics.wifiReconnectTimestamps[metrics.wifiReconnectIndex] = now;
+  metrics.wifiReconnectIndex = (metrics.wifiReconnectIndex + 1) % 10;
+  metrics.lastForcedWifiReconnect = now;
+  
+  // Clean disconnect/reconnect to force new BSSID selection
+  WiFi.disconnect();
+  delay(500);  // Give time for clean disconnect
+  WiFi.mode(WIFI_STA);
+  #ifdef ESP8266
+    WiFi.persistent(true);
+    WiFi.setAutoReconnect(true);
+  #else
+    WiFi.setAutoReconnect(true);
+  #endif
+  WiFi.reconnect();
+}
+
 // Gracefully disconnect from MQTT broker with proper cleanup
+// Check if we're reconnecting too frequently (prevent infinite loops)
+bool isWifiReconnectRateLimited() {
+  unsigned long now = millis();
+  
+  // Cooldown: minimum 5 minutes between forced reconnects
+  if (metrics.lastForcedWifiReconnect > 0 && 
+      (now - metrics.lastForcedWifiReconnect) < WIFI_FORCED_RECONNECT_COOLDOWN_MS) {
+    return true;
+  }
+  
+  // Emergency brake: count reconnects in last hour
+  int reconnectsInLastHour = 0;
+  for (int i = 0; i < 10; i++) {
+    if (metrics.wifiReconnectTimestamps[i] > 0 &&
+        (now - metrics.wifiReconnectTimestamps[i]) < WIFI_RECONNECT_HISTORY_WINDOW_MS) {
+      reconnectsInLastHour++;
+    }
+  }
+  
+  if (reconnectsInLastHour >= WIFI_MAX_RECONNECTS_PER_HOUR) {
+    Serial.printf("[WiFi] EMERGENCY BRAKE: %d reconnects in last hour, throttling\n", reconnectsInLastHour);
+    publishEvent("wifi_reconnect_throttle", 
+                 "Too many reconnects (" + String(reconnectsInLastHour) + "/hour), throttling to prevent loop",
+                 "error");
+    return true;
+  }
+  
+  return false;
+}
+
+// Force WiFi reconnect to try different mesh node
+void forceWifiReconnect(const String& reason) {
+  unsigned long now = millis();
+  
+  Serial.printf("[WiFi] Forcing reconnect: %s\n", reason.c_str());
+  publishEvent("wifi_forced_reconnect", "Reason: " + reason, "warning");
+  
+  // Track reconnect in circular buffer
+  metrics.wifiReconnectTimestamps[metrics.wifiReconnectIndex] = now;
+  metrics.wifiReconnectIndex = (metrics.wifiReconnectIndex + 1) % 10;
+  metrics.lastForcedWifiReconnect = now;
+  
+  // Clean disconnect/reconnect to force new BSSID selection
+  WiFi.disconnect();
+  delay(500);  // Give time for clean disconnect
+  WiFi.mode(WIFI_STA);
+  #ifdef ESP8266
+    WiFi.persistent(true);
+    WiFi.setAutoReconnect(true);
+  #else
+    WiFi.setAutoReconnect(true);
+  #endif
+  WiFi.reconnect();
+}
+
 void gracefulMqttDisconnect() {
   if (!mqttClient.connected()) {
     return;  // Already disconnected
@@ -587,7 +708,13 @@ bool publishTemperature() {
   doc["timestamp"] = millis() / 1000;
   doc["celsius"] = temperatureC.toFloat();
   doc["fahrenheit"] = temperatureF.toFloat();
-  return publishJson(getTopicTemperature(), doc, false);
+  bool success = publishJson(getTopicTemperature(), doc, false);
+  if (success) {
+    metrics.consecutiveMqttFailures = 0;  // Reset counter on success
+  } else {
+    metrics.consecutiveMqttFailures++;
+  }
+  return success;
 }
 
 void publishStatus() {
@@ -1494,6 +1621,7 @@ void loop() {
       // Always attempt reconnect - WiFiManager handles credentials
       WiFi.reconnect();
       metrics.wifiReconnects++;
+      metrics.consecutiveMqttFailures = 0;  // Reset MQTT failure counter when WiFi is down
       // Track how long we've been offline
       if (wifiDisconnectedSince == 0) {
         wifiDisconnectedSince = now;
@@ -1522,6 +1650,30 @@ void loop() {
       // We were disconnected previously and now back online
       publishEvent("wifi_reconnected", "WiFi reconnected - SSID: " + WiFi.SSID() + ", IP: " + WiFi.localIP().toString(), "info");
       wifiDisconnectedSince = 0;
+    } else {
+      // === WiFi Mesh Roaming Logic (Connected but possibly poor backhaul) ===
+      // Tier 1: MQTT publish failure tracking (PRIMARY - detects "connected but no backhaul")
+      if (metrics.consecutiveMqttFailures >= WIFI_CONSECUTIVE_MQTT_FAILURE_THRESHOLD) {
+        if (!isWifiReconnectRateLimited()) {
+          forceWifiReconnect("MQTT failures: " + String(metrics.consecutiveMqttFailures));
+          metrics.consecutiveMqttFailures = 0;  // Reset after forced reconnect
+        }
+      }
+      // Tier 2: RSSI degradation + MQTT failures (SECONDARY - poor signal contributing to failures)
+      else if (WiFi.RSSI() < WIFI_RSSI_POOR_THRESHOLD && metrics.consecutiveMqttFailures >= 2) {
+        if (!isWifiReconnectRateLimited()) {
+          forceWifiReconnect("Poor RSSI (" + String(WiFi.RSSI()) + "dBm) + MQTT failures (" + String(metrics.consecutiveMqttFailures) + ")");
+          metrics.consecutiveMqttFailures = 0;
+        }
+      }
+      // Tier 3: Periodic forced reconnect (BACKSTOP - once per 24h to prevent sticky connections)
+      else if (metrics.lastPeriodicReconnect == 0 || (now - metrics.lastPeriodicReconnect) > WIFI_PERIODIC_RECONNECT_INTERVAL_MS) {
+        if (!isWifiReconnectRateLimited()) {
+          forceWifiReconnect("Periodic refresh (24h)");
+          metrics.lastPeriodicReconnect = now;
+          metrics.consecutiveMqttFailures = 0;
+        }
+      }
     }
   }
 
