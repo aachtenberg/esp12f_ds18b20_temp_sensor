@@ -47,6 +47,10 @@
 - **Keep platformio.ini clean - no hardcoded credentials or upload flags**
 - **ALWAYS bump firmware version before building/deploying: `cd temperature-sensor && ./update_version.sh --patch`**
 - **After deploying firmware, update device inventory in `temperature-sensor/docs/DEVICE_INVENTORY.md` with device name, IP, chip ID, and version**
+- **Use MQTT device control script: `./scripts/mqtt_device_control.sh <command> -d <Device-Name>` (command first, then `-d` for device)**
+  - Device names use hyphens and capitals: `Pump-House`, `Main-Cottage`, `Small-Garage`, `Spa`, etc.
+  - Examples: `./scripts/mqtt_device_control.sh restart -d Pump-House`, `./scripts/mqtt_device_control.sh status -d Spa`
+  - Available commands: `restart`, `status`, `deepsleep <seconds>`, `interval <seconds>`, `monitor`
 
 ---
 

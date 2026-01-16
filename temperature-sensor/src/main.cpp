@@ -510,61 +510,6 @@ void forceWifiReconnect(const String& reason) {
 }
 
 // Gracefully disconnect from MQTT broker with proper cleanup
-// Check if we're reconnecting too frequently (prevent infinite loops)
-bool isWifiReconnectRateLimited() {
-  unsigned long now = millis();
-  
-  // Cooldown: minimum 5 minutes between forced reconnects
-  if (metrics.lastForcedWifiReconnect > 0 && 
-      (now - metrics.lastForcedWifiReconnect) < WIFI_FORCED_RECONNECT_COOLDOWN_MS) {
-    return true;
-  }
-  
-  // Emergency brake: count reconnects in last hour
-  int reconnectsInLastHour = 0;
-  for (int i = 0; i < 10; i++) {
-    if (metrics.wifiReconnectTimestamps[i] > 0 &&
-        (now - metrics.wifiReconnectTimestamps[i]) < WIFI_RECONNECT_HISTORY_WINDOW_MS) {
-      reconnectsInLastHour++;
-    }
-  }
-  
-  if (reconnectsInLastHour >= WIFI_MAX_RECONNECTS_PER_HOUR) {
-    Serial.printf("[WiFi] EMERGENCY BRAKE: %d reconnects in last hour, throttling\n", reconnectsInLastHour);
-    publishEvent("wifi_reconnect_throttle", 
-                 "Too many reconnects (" + String(reconnectsInLastHour) + "/hour), throttling to prevent loop",
-                 "error");
-    return true;
-  }
-  
-  return false;
-}
-
-// Force WiFi reconnect to try different mesh node
-void forceWifiReconnect(const String& reason) {
-  unsigned long now = millis();
-  
-  Serial.printf("[WiFi] Forcing reconnect: %s\n", reason.c_str());
-  publishEvent("wifi_forced_reconnect", "Reason: " + reason, "warning");
-  
-  // Track reconnect in circular buffer
-  metrics.wifiReconnectTimestamps[metrics.wifiReconnectIndex] = now;
-  metrics.wifiReconnectIndex = (metrics.wifiReconnectIndex + 1) % 10;
-  metrics.lastForcedWifiReconnect = now;
-  
-  // Clean disconnect/reconnect to force new BSSID selection
-  WiFi.disconnect();
-  delay(500);  // Give time for clean disconnect
-  WiFi.mode(WIFI_STA);
-  #ifdef ESP8266
-    WiFi.persistent(true);
-    WiFi.setAutoReconnect(true);
-  #else
-    WiFi.setAutoReconnect(true);
-  #endif
-  WiFi.reconnect();
-}
-
 void gracefulMqttDisconnect() {
   if (!mqttClient.connected()) {
     return;  // Already disconnected

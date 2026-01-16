@@ -30,6 +30,11 @@ static bool displayShouldBeOn = true;        // Track current state
 // Track display power state to avoid unnecessary I2C traffic
 static bool displayIsPoweredOn = true;
 
+// Screen cycling for temperature-only and network status views
+static unsigned long lastScreenSwitch = 0;
+static int currentScreen = 0;  // 0 = temperature, 1 = network info
+#define SCREEN_CYCLE_MS 3000  // Switch screens every 3 seconds
+
 // =============================================================================
 // INITIALIZATION
 // =============================================================================
@@ -105,18 +110,24 @@ bool isDisplayOnWindow() {
 // =============================================================================
 
 void updateDisplay(const char* tempC, const char* tempF, bool wifiConnected, const char* ipAddress, int batteryPercent) {
-    // Check battery level - disable display if battery powered and below 50%
-    #ifdef BATTERY_POWERED
+    // Only apply battery-based power saving if battery monitoring is actually enabled
+    // Check VALUE of BATTERY_POWERED (not just if defined) AND if BATTERY_MONITOR_ENABLED is defined
+    #if BATTERY_POWERED && defined(BATTERY_MONITOR_ENABLED)
+    // batteryPercent is -1 when no battery present, 0-100 when battery is monitored
     if (batteryPercent >= 0 && batteryPercent < 50) {
+        // Low battery - power off display to conserve power
         if (displayIsPoweredOn) {
-            display.setPowerSave(1);  // Power off display to save battery
+            display.setPowerSave(1);
             displayIsPoweredOn = false;
+            Serial.println("[OLED] Display powered off - low battery");
         }
         return;
     } else if (batteryPercent >= 50) {
+        // Battery recovered - power on display
         if (!displayIsPoweredOn) {
-            display.setPowerSave(0);  // Power on display when battery recovers
+            display.setPowerSave(0);
             displayIsPoweredOn = true;
+            Serial.println("[OLED] Display powered on - battery recovered");
         }
     }
     #endif
@@ -126,45 +137,48 @@ void updateDisplay(const char* tempC, const char* tempF, bool wifiConnected, con
         return;  // Skip update if outside display window
     }
     
+    // Cycle between screens every SCREEN_CYCLE_MS milliseconds
+    unsigned long now = millis();
+    if (now - lastScreenSwitch > SCREEN_CYCLE_MS) {
+        currentScreen = (currentScreen + 1) % 2;  // Toggle between 0 and 1
+        lastScreenSwitch = now;
+    }
+    
     display.clearBuffer();
 
     // Parse temperature string and format to 1 decimal place
     char tempCStr[16];
-
-    // Convert input string to float and back to get 1 decimal precision
     float tempCVal = atof(tempC);
-
-    // Format with 1 decimal place
     snprintf(tempCStr, sizeof(tempCStr), "%.1f", tempCVal);
-
-    // Add degree symbol and unit
     strcat(tempCStr, "\xb0");  // degree symbol
     strcat(tempCStr, "C");
 
-    // Draw Celsius temperature (extra large, centered, positioned below yellow zone)
-    // Y position 18 keeps the 32-pixel tall font mostly in the blue zone (starts at row 18)
-    display.setFont(u8g2_font_logisoso32_tn);  // Extra large number font (32 pixels tall)
-    int tempCWidth = display.getStrWidth(tempCStr);
-    display.drawStr((128 - tempCWidth) / 2, 18, tempCStr);
-
-    // Draw WiFi status (bottom left)
-    display.setFont(u8g2_font_5x8_tf);  // Small text font
-    if (wifiConnected) {
-        display.drawStr(4, 54, "WiFi: OK");
+    if (currentScreen == 0) {
+        // Screen 1: Temperature only (large and centered)
+        display.setFont(u8g2_font_logisoso42_tn);  // Extra large 42-pixel font
+        int tempCWidth = display.getStrWidth(tempCStr);
+        // Center horizontally and position for visibility (Y=11 positions font nicely on 64px display)
+        display.drawStr((128 - tempCWidth) / 2, 11, tempCStr);
     } else {
-        display.drawStr(4, 54, "WiFi: --");
-    }
-
-    // Draw IP address (if connected, centered at bottom)
-    if (wifiConnected && ipAddress != nullptr && strlen(ipAddress) > 0) {
-        // Truncate IP if too long (shouldn't happen for normal IPs)
-        char ipStr[24];
-        strncpy(ipStr, ipAddress, sizeof(ipStr) - 1);
-        ipStr[sizeof(ipStr) - 1] = '\0';
-
-        int ipWidth = display.getStrWidth(ipStr);
-        // Center the IP address at bottom
-        display.drawStr((128 - ipWidth) / 2, 54, ipStr);
+        // Screen 2: Network status
+        display.setFont(u8g2_font_9x15B_tf);  // Bold font for better readability
+        
+        // WiFi status (centered near top)
+        const char* statusText;
+        if (wifiConnected) {
+            statusText = "Connected";
+        } else {
+            statusText = "Disconnected";
+        }
+        int statusWidth = display.getStrWidth(statusText);
+        display.drawStr((128 - statusWidth) / 2, 15, statusText);
+        
+        // IP address (centered in middle)
+        if (wifiConnected && ipAddress != nullptr && strlen(ipAddress) > 0) {
+            display.setFont(u8g2_font_8x13_tf);  // Smaller monospace for IP
+            int ipWidth = display.getStrWidth(ipAddress);
+            display.drawStr((128 - ipWidth) / 2, 40, ipAddress);
+        }
     }
 
     display.sendBuffer();
