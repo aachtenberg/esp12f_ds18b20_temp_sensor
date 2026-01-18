@@ -479,7 +479,7 @@ pio run -e esp32dev -t upload --upload-port $DEVICE_IP
 ### Version Format
 ```
 MAJOR.MINOR.PATCH-buildYYYYMMDD
-Example: 1.0.3-build20251222
+Example: 1.0.48-build20260118
 ```
 
 ### Implementation Details
@@ -491,8 +491,8 @@ build_flags =
     -D WIFI_PS_MODE=WIFI_PS_MIN_MODEM
     -D FIRMWARE_VERSION_MAJOR=1
     -D FIRMWARE_VERSION_MINOR=0
-    -D FIRMWARE_VERSION_PATCH=2
-    -D BUILD_TIMESTAMP=20251222
+    -D FIRMWARE_VERSION_PATCH=48
+    -D BUILD_TIMESTAMP=20260118
 ```
 
 #### Version Header (include/version.h)
@@ -506,7 +506,7 @@ All MQTT messages include `firmware_version` field:
 ```json
 {
   "device": "Temp Sensor",
-  "firmware_version": "1.0.3-build20251222",
+  "firmware_version": "1.0.48-build20260118",
   "current_temp_c": 23.5
 }
 ```
