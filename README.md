@@ -192,13 +192,13 @@ All devices use hierarchical topic structure:
 
 | Project | Status | Devices | Version | Last Update |
 |---------|--------|---------|---------|-------------|
-| Temperature Sensor | ✅ Production | 8 | v1.0.8-v1.1.0 | Dec 24, 2025 |
+| Temperature Sensor | ✅ Production | 8 | v1.0.48+ | Jan 16, 2026 |
 | BME280 Sensor | 🔧 Testing | 0 | v1.0.0 | Jan 3, 2026 |
-| Surveillance | ✅ Production | 3 | Active | Dec 2025 |
-| Solar Monitor | ✅ Production | 1 | Active | Dec 2025 |
+| Surveillance | ✅ Production | 3 | Active | Jan 2026 |
+| Solar Monitor | ✅ Production | 1 | Active | Jan 2026 |
 
 ---
 
 **Repository**: [github.com/aachtenberg/esp-sensor-hub](https://github.com/aachtenberg/esp-sensor-hub)  
 **License**: See LICENSE file  
-**Last Updated**: January 3, 2026
+**Last Updated**: January 18, 2026

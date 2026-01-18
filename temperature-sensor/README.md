@@ -152,7 +152,7 @@ cd temperature-sensor
 pio run -e esp32dev -t upload --upload-port 192.168.0.X
 ```
 
-Version appears in all MQTT messages as `firmware_version: "1.0.13-build20251230"`
+Version appears in all MQTT messages as `firmware_version: "1.0.48-build20260116"`
 
 ## MQTT Topics
 
@@ -165,7 +165,7 @@ All topics use prefix: `esp-sensor-hub/{device-name}/`
 {
   "device": "Pump House",
   "chip_id": "D8F15B0E72A5",
-  "firmware_version": "1.0.13-build20251230",
+  "firmware_version": "1.0.48-build20260116",
   "schema_version": 1,
   "timestamp": 12345,
   "uptime_seconds": 600,
@@ -180,7 +180,7 @@ All topics use prefix: `esp-sensor-hub/{device-name}/`
 {
   "device": "Pump House",
   "chip_id": "D8F15B0E72A5",
-  "firmware_version": "1.0.13-build20251230",
+  "firmware_version": "1.0.48-build20260116",
   "uptime_seconds": 600,
   "free_heap": 35000,
   "rssi": -65,

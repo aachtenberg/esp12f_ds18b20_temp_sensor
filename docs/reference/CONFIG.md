@@ -166,7 +166,7 @@ build_flags =
     -D FIRMWARE_VERSION_MAJOR=1
     -D FIRMWARE_VERSION_MINOR=1
     -D FIRMWARE_VERSION_PATCH=0
-    -D BUILD_TIMESTAMP=20251223
+    -D BUILD_TIMESTAMP=20260118
 ```
 
 Versions visible in:
@@ -322,5 +322,5 @@ See individual project documentation for detailed setup:
 
 ---
 
-**Last Updated**: January 10, 2026
-**Projects**: Temperature Sensor (8 devices, v1.0.28 latest) | Surveillance (1 device) | Solar Monitor (1 device)
+**Last Updated**: January 18, 2026
+**Projects**: Temperature Sensor (8 devices, v1.0.48+ latest) | BME280 Sensor (development) | Surveillance (3 devices) | Solar Monitor (1 device)

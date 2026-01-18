@@ -861,7 +861,7 @@ The TP4056 module has a limitation: when USB is plugged in, it powers the load A
 
 ---
 
-**Last Updated:** January 3, 2026  
+**Last Updated:** January 18, 2026  
 **Tested Platforms:** ESP32-DevKitC, ESP32-S3-WROOM  
 **Battery Types Tested:** 18650 (Samsung INR18650-25R), 3.7V 2000mAh LiPo  
 **Status:** Production-ready, field-tested

@@ -247,6 +247,6 @@ sudo docker logs grafana
 
 ---
 
-**Generated**: November 24, 2025  
+**Generated**: January 18, 2026  
 **Architecture**: InfluxDB + Grafana + WiFiManager Portal  
-**Projects**: Temperature Sensors + Solar Monitor
+**Projects**: Temperature Sensors + BME280 Sensors + Surveillance Cameras + Solar Monitor

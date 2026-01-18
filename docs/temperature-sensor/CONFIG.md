@@ -544,7 +544,7 @@ pio run -e esp8266 -t upload  # USB-powered, no display, API endpoints only
 #### Version Format
 ```
 MAJOR.MINOR.PATCH-buildYYYYMMDD
-Example: 1.0.3-build20251222
+Example: 1.0.48-build20260118
 ```
 
 #### MQTT Version Fields
@@ -552,7 +552,7 @@ All MQTT messages include `firmware_version`:
 ```json
 {
   "device": "Temp Sensor",
-  "firmware_version": "1.0.3-build20251222",
+  "firmware_version": "1.0.48-build20260118",
   "current_temp_c": 23.5,
   "event": "ota_start"
 }

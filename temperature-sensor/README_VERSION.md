@@ -8,7 +8,7 @@ The ESP32 temperature sensor now includes automatic firmware version tracking th
 
 Versions follow the format: `MAJOR.MINOR.PATCH-buildYYYYMMDD`
 
-Example: `1.0.3-build20251222`
+Example: `1.0.48-build20260118`
 
 - **MAJOR**: Major version (breaking changes)
 - **MINOR**: Minor version (new features)
@@ -25,7 +25,7 @@ All MQTT messages now include the firmware version:
 ```json
 {
   "device": "Temp Sensor",
-  "firmware_version": "1.0.3-build20251222",
+  "firmware_version": "1.0.48-build20260118",
   "current_temp_c": 23.5,
   "current_temp_f": 74.3
 }
@@ -35,7 +35,7 @@ All MQTT messages now include the firmware version:
 ```json
 {
   "device": "Temp Sensor",
-  "firmware_version": "1.0.3-build20251222",
+  "firmware_version": "1.0.48-build20260118",
   "wifi_connected": true,
   "uptime_seconds": 3600
 }
@@ -45,7 +45,7 @@ All MQTT messages now include the firmware version:
 ```json
 {
   "device": "Temp Sensor",
-  "firmware_version": "1.0.3-build20251222",
+  "firmware_version": "1.0.48-build20260118",
   "event": "ota_start",
   "message": "OTA update starting (sketch)"
 }
@@ -74,18 +74,18 @@ build_flags =
     -D WIFI_PS_MODE=WIFI_PS_MIN_MODEM
     -D FIRMWARE_VERSION_MAJOR=1
     -D FIRMWARE_VERSION_MINOR=0
-    -D FIRMWARE_VERSION_PATCH=3  # Increment for bug fixes
-    -D BUILD_TIMESTAMP=20251222
+    -D FIRMWARE_VERSION_PATCH=48  # Increment for bug fixes
+    -D BUILD_TIMESTAMP=20260118
 ```
 
 ## OTA Version Tracking
 
 When you perform an OTA update:
 
-1. **Before OTA**: Device reports old version (e.g., `1.0.3-build20251220`)
+1. **Before OTA**: Device reports old version (e.g., `1.0.47-build20260115`)
 2. **OTA Start**: Device publishes `ota_start` event with old version
 3. **OTA Complete**: Device reboots with new firmware
-4. **After OTA**: Device reports new version (e.g., `1.0.3-build20251222`)
+4. **After OTA**: Device reports new version (e.g., `1.0.48-build20260118`)
 
 This allows you to verify OTA success by checking version changes in MQTT messages.
 
