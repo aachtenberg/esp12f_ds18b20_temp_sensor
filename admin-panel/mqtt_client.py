@@ -86,11 +86,31 @@ class MQTTClient:
             if device_name not in self.device_states:
                 self.device_states[device_name] = {}
             
+            # Use device's timestamp from payload if available, otherwise use current time
+            device_timestamp = datetime.now().isoformat()
+            if isinstance(payload_json, dict):
+                # Check for timestamp in payload (ESP devices send this)
+                if 'timestamp' in payload_json:
+                    try:
+                        # Convert milliseconds/seconds timestamp to ISO format
+                        ts_value = payload_json['timestamp']
+                        if ts_value > 1000000000000:  # Milliseconds
+                            device_timestamp = datetime.fromtimestamp(ts_value / 1000).isoformat()
+                        elif ts_value > 0:  # Seconds since boot - mark as stale
+                            # This is uptime, not real time - use current time but mark it
+                            device_timestamp = datetime.now().isoformat()
+                    except (ValueError, OSError):
+                        pass
+            
             self.device_states[device_name][message_type] = {
                 'payload': payload_json,
-                'timestamp': datetime.now().isoformat()
+                'timestamp': device_timestamp
             }
-            self.device_states[device_name]['last_seen'] = datetime.now().isoformat()
+            
+            # Only update last_seen if this is a recent message
+            # If device_timestamp is current (not uptime), use it
+            if message_type in ['status', 'temperature']:  # Real-time messages
+                self.device_states[device_name]['last_seen'] = device_timestamp
             
             # Emit to web clients
             self.socketio.emit('mqtt_message', message_data)
