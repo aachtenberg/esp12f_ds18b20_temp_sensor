@@ -1,0 +1,40 @@
+version: '3.8'
+
+services:
+  mqtt-admin-panel:
+    build: .
+    container_name: esp-sensor-hub-admin
+    ports:
+      - "5000:5000"
+    environment:
+      # Flask Configuration
+      - SECRET_KEY=${SECRET_KEY:-change-this-to-a-random-secret-key}
+      - FLASK_DEBUG=${FLASK_DEBUG:-False}
+      - FLASK_HOST=0.0.0.0
+      - FLASK_PORT=5000
+      
+      # MQTT Configuration
+      - MQTT_BROKER=${MQTT_BROKER:-localhost}
+      - MQTT_PORT=${MQTT_PORT:-1883}
+      - MQTT_USERNAME=${MQTT_USERNAME:-}
+      - MQTT_PASSWORD=${MQTT_PASSWORD:-}
+      
+      # Device Inventory Path
+      - DEVICE_INVENTORY_PATH=${DEVICE_INVENTORY_PATH:-../temperature-sensor/docs/DEVICE_INVENTORY.md}
+    
+    volumes:
+      # Mount device inventory for live updates
+      - ../temperature-sensor/docs/DEVICE_INVENTORY.md:/app/../temperature-sensor/docs/DEVICE_INVENTORY.md:ro
+    
+    restart: unless-stopped
+    
+    networks:
+      - esp-network
+    
+    # Use host network mode if MQTT broker is on host
+    # Uncomment the line below and comment out the 'ports' and 'networks' sections
+    # network_mode: host
+
+networks:
+  esp-network:
+    driver: bridge

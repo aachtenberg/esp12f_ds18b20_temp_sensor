@@ -20,11 +20,51 @@ Web-based administration panel for monitoring and controlling ESP32/ESP8266 temp
 
 ## Requirements
 
-- Python 3.8+
+- Python 3.8+ OR Docker
 - MQTT broker (Mosquitto recommended)
 - Network access to ESP devices
 
-## Installation
+## Quick Start (Docker - Recommended)
+
+### 1. Configure Environment
+
+```bash
+cd admin-panel
+cp .env.example .env
+# Edit .env with your MQTT broker IP
+```
+
+### 2. Run with Docker
+
+```bash
+./run-docker.sh
+```
+
+Or manually:
+
+```bash
+docker-compose up -d
+```
+
+The admin panel will be available at: **http://localhost:5000**
+
+### Docker Commands
+
+```bash
+# View logs
+docker-compose logs -f
+
+# Stop
+docker-compose down
+
+# Restart
+docker-compose restart
+
+# Rebuild after code changes
+docker-compose up -d --build
+```
+
+## Manual Installation (Without Docker)
 
 ### 1. Install Dependencies
 
@@ -57,7 +97,16 @@ FLASK_PORT=5000
 
 ### 3. Run the Application
 
+Using the start script:
+
 ```bash
+./start.sh
+```
+
+Or manually:
+
+```bash
+source venv/bin/activate
 python app.py
 ```
 
@@ -244,26 +293,34 @@ ExecStart=/path/to/venv/bin/python app.py
 Restart=always
 
 [Install]
-WantedBy=multi-user.target
-```
+WantedBy=multi-u (Included)
 
-Enable and start:
+The project includes full Docker support:
+
+**Quick Start:**
 ```bash
-sudo systemctl enable mqtt-admin-panel
-sudo systemctl start mqtt-admin-panel
+./run-docker.sh
 ```
 
-### Using Docker
+**Docker Compose:**
+```bash
+docker-compose up -d
+```
 
-```dockerfile
-FROM python:3.9-slim
+**Features:**
+- Auto-restart on failure
+- Health checks
+- Volume mount for live device inventory updates
+- Configurable via .env file
+- Optimized multi-stage build with caching
 
-WORKDIR /app
-COPY requirements.txt .
-RUN pip install -r requirements.txt
+**Network Configuration:**
 
-COPY . .
+By default, uses bridge networking. If your MQTT broker is on the host machine:
 
+1. Edit `docker-compose.yml`
+2. Uncomment `network_mode: host`
+3. Comment out `ports` and `networks` sections
 EXPOSE 5000
 CMD ["python", "app.py"]
 ```

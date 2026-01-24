@@ -4,3 +4,4 @@ paho-mqtt==1.6.1
 python-socketio==5.10.0
 eventlet==0.33.3
 python-dotenv==1.0.0
+requests==2.31.0
