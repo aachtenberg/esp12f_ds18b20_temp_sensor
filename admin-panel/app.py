@@ -83,6 +83,9 @@ def get_devices():
     devices = load_device_inventory()
     device_states = mqtt_client.get_device_states() if mqtt_client else {}
     
+    # Track which MQTT devices we've matched
+    matched_mqtt_devices = set()
+    
     # Enrich devices with MQTT state and determine online status
     enriched_devices = []
     for device in devices:
@@ -99,16 +102,29 @@ def get_devices():
             device['mqtt_name'] = mqtt_name
             device['online'] = True
             enriched_devices.append(device)
+            matched_mqtt_devices.add(mqtt_name)
         elif device_name in device_states:
             device['mqtt_state'] = device_states[device_name]
             device['mqtt_name'] = device_name
             device['online'] = True
             enriched_devices.append(device)
-        else:
-            # Check if device is publishing under any name variation
-            device['online'] = False
-            # Only include devices that have published at least once
-            # Don't show devices from inventory that never reported
+            matched_mqtt_devices.add(device_name)
+    
+    # Add devices publishing to MQTT but not in inventory
+    for mqtt_name, state in device_states.items():
+        if mqtt_name not in matched_mqtt_devices:
+            # Create device entry for unknown MQTT device
+            enriched_devices.append({
+                'name': mqtt_name.replace('-', ' '),  # Display with spaces
+                'chip_id': 'Unknown',
+                'platform': 'Unknown',
+                'display': 'Unknown',
+                'ip': 'Unknown',
+                'status': '✅ Active',
+                'mqtt_state': state,
+                'mqtt_name': mqtt_name,
+                'online': True
+            })
     
     # Sort: online devices first, then by name
     enriched_devices.sort(key=lambda d: (not d.get('online', False), d['name']))
