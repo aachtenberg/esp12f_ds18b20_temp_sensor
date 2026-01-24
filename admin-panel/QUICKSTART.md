@@ -54,8 +54,19 @@ Open browser: **http://localhost:5000**
 
 ## ⚙️ Configuration (.env)
 
+**Important:** The panel needs to connect to your MQTT broker to receive device updates!
+
+### Quick Configure
 ```bash
-# MQTT Broker (REQUIRED)
+cd admin-panel
+./configure-mqtt.sh
+# Enter your broker IP (e.g., 192.168.0.100)
+```
+
+### Manual Configuration
+Edit `.env` file:
+```bash
+# MQTT Broker (REQUIRED for live updates)
 MQTT_BROKER=192.168.0.100  # Change to your broker IP
 
 # Optional Settings
@@ -64,6 +75,11 @@ MQTT_USERNAME=              # If auth enabled
 MQTT_PASSWORD=              # If auth enabled
 FLASK_PORT=5000
 ```
+
+**Finding your MQTT broker IP:**
+- Same machine: Use host's IP (not localhost if using Docker)
+- WSL2: Use Windows IP from `ip route show default`
+- Other machine: Use broker's LAN IP
 
 ---
 
@@ -112,10 +128,12 @@ docker compose logs
 ```
 
 ### MQTT not connecting
-1. Check `MQTT_BROKER` in `.env`
-2. Verify broker is running: `systemctl status mosquitto`
-3. Test connectivity: `ping {MQTT_BROKER}`
-4. Check firewall allows port 1883
+1. **Check `MQTT_BROKER` in `.env`** - Must be reachable IP (not `localhost` in Docker)
+2. **Use helper script**: `./configure-mqtt.sh`
+3. Verify broker is running: `systemctl status mosquitto`
+4. Test connectivity: `ping {MQTT_BROKER}`
+5. Check firewall allows port 1883
+6. **For WSL2**: Use Windows host IP, not localhost
 
 ### Can't access web interface
 1. Check container is running: `docker ps`
