@@ -77,10 +77,44 @@ function updateDevice(deviceName, state) {
     const tempEl = deviceCard.querySelector('.device-temp');
     const lastSeenEl = deviceCard.querySelector('.device-last-seen');
     
-    // Update online status
-    statusEl.textContent = 'Online';
-    statusEl.classList.remove('offline');
-    statusEl.classList.add('online');
+    // Determine online/offline based on last_seen timestamp
+    let isOnline = false;
+    let lastSeenText = 'Never';
+    
+    if (state.last_seen) {
+        const lastSeen = new Date(state.last_seen);
+        const now = new Date();
+        const diffMs = now - lastSeen;
+        const diffSec = Math.floor(diffMs / 1000);
+        
+        // Consider online if seen in last 5 minutes (300 seconds)
+        isOnline = diffSec < 300;
+        
+        // Format time ago
+        if (diffSec < 60) {
+            lastSeenText = `${diffSec}s ago`;
+        } else if (diffSec < 3600) {
+            lastSeenText = `${Math.floor(diffSec / 60)}m ago`;
+        } else if (diffSec < 86400) {
+            lastSeenText = `${Math.floor(diffSec / 3600)}h ago`;
+        } else {
+            lastSeenText = `${Math.floor(diffSec / 86400)}d ago`;
+        }
+    }
+    
+    // Update status indicator
+    if (isOnline) {
+        statusEl.textContent = 'Online';
+        statusEl.classList.remove('offline');
+        statusEl.classList.add('online');
+    } else {
+        statusEl.textContent = 'Offline';
+        statusEl.classList.remove('online');
+        statusEl.classList.add('offline');
+    }
+    
+    // Update last seen
+    lastSeenEl.textContent = `Last seen: ${lastSeenText}`;
     
     // Update temperature if available
     if (state.temperature && state.temperature.payload) {
@@ -88,32 +122,6 @@ function updateDevice(deviceName, state) {
                      state.temperature.payload.temperature_c;
         if (temp !== undefined) {
             tempEl.textContent = `${temp.toFixed(1)}°C`;
-        }
-    }
-    
-    // Update last seen
-    if (state.last_seen) {
-        const lastSeen = new Date(state.last_seen);
-        const now = new Date();
-        const diffMs = now - lastSeen;
-        const diffSec = Math.floor(diffMs / 1000);
-        
-        let timeAgo;
-        if (diffSec < 60) {
-            timeAgo = `${diffSec}s ago`;
-        } else if (diffSec < 3600) {
-            timeAgo = `${Math.floor(diffSec / 60)}m ago`;
-        } else {
-            timeAgo = `${Math.floor(diffSec / 3600)}h ago`;
-        }
-        
-        lastSeenEl.textContent = `Last seen: ${timeAgo}`;
-        
-        // Mark as offline if no updates for 5 minutes
-        if (diffSec > 300) {
-            statusEl.textContent = 'Offline';
-            statusEl.classList.remove('online');
-            statusEl.classList.add('offline');
         }
     }
 }
