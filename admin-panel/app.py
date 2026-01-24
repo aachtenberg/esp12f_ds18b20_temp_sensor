@@ -83,16 +83,37 @@ def get_devices():
     devices = load_device_inventory()
     device_states = mqtt_client.get_device_states() if mqtt_client else {}
     
-    # Enrich devices with MQTT state
+    # Enrich devices with MQTT state and determine online status
+    enriched_devices = []
     for device in devices:
         device_name = device['name']
-        if device_name in device_states:
-            device['mqtt_state'] = device_states[device_name]
+        
+        # Try exact match first, then try with hyphens (MQTT naming convention)
+        mqtt_name = device_name
+        if device_name not in device_states:
+            # Try hyphenated version
+            mqtt_name = device_name.replace(' ', '-')
+        
+        if mqtt_name in device_states:
+            device['mqtt_state'] = device_states[mqtt_name]
+            device['mqtt_name'] = mqtt_name
             device['online'] = True
+            enriched_devices.append(device)
+        elif device_name in device_states:
+            device['mqtt_state'] = device_states[device_name]
+            device['mqtt_name'] = device_name
+            device['online'] = True
+            enriched_devices.append(device)
         else:
+            # Check if device is publishing under any name variation
             device['online'] = False
+            # Only include devices that have published at least once
+            # Don't show devices from inventory that never reported
     
-    return jsonify(devices)
+    # Sort: online devices first, then by name
+    enriched_devices.sort(key=lambda d: (not d.get('online', False), d['name']))
+    
+    return jsonify(enriched_devices)
 
 @app.route('/api/messages')
 def get_messages():

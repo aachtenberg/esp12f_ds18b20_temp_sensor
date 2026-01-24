@@ -189,22 +189,33 @@ function clearMessages() {
 
 // Command Functions
 function sendCommand(device, command) {
-    console.log(`Sending command '${command}' to ${device}`);
-    socket.emit('send_command', { device, command });
+    // Use mqtt_name if available (handles hyphenated names)
+    const mqttName = device.dataset.mqttname || device;
+    const deviceName = typeof device === 'string' ? device : mqttName;
+    
+    console.log(`Sending command '${command}' to ${deviceName}`);
+    socket.emit('send_command', { device: deviceName, command });
     
     // Add to message log
     addMessage({
-        topic: `esp-sensor-hub/${device}/command`,
+        topic: `esp-sensor-hub/${deviceName}/command`,
         payload: command,
         timestamp: new Date().toISOString(),
-        device: device,
+        device: deviceName,
         type: 'command'
     });
 }
 
-function showDeepSleepModal(device) {
-    currentSleepDevice = device;
-    document.getElementById('sleep-device-name').textContent = device;
+function showDeepSleepModal(deviceOrElement) {
+    // Handle both string device name and DOM element
+    if (typeof deviceOrElement === 'string') {
+        currentSleepDevice = deviceOrElement;
+    } else {
+        // It's a DOM element (device card)
+        currentSleepDevice = deviceOrElement.dataset.mqttname || deviceOrElement.dataset.device;
+    }
+    
+    document.getElementById('sleep-device-name').textContent = currentSleepDevice;
     document.getElementById('sleep-modal').style.display = 'block';
 }
 

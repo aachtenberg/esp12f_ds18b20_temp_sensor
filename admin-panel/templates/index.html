@@ -31,7 +31,7 @@
                 </div>
                 <div id="devices-container" class="devices-grid">
                     {% for device in devices %}
-                    <div class="device-card" data-device="{{ device.name }}">
+                    <div class="device-card" data-device="{{ device.name }}" data-mqttname="{{ device.get('mqtt_name', device.name) }}">
                         <div class="device-header">
                             <h3>{{ device.name }}</h3>
                             <span class="device-status offline">Offline</span>
@@ -47,9 +47,9 @@
                             <p class="device-last-seen">Last seen: Never</p>
                         </div>
                         <div class="device-controls">
-                            <button onclick="sendCommand('{{ device.name }}', 'status')" class="btn btn-info">📊 Status</button>
-                            <button onclick="sendCommand('{{ device.name }}', 'restart')" class="btn btn-warning">🔄 Restart</button>
-                            <button onclick="showDeepSleepModal('{{ device.name }}')" class="btn btn-sleep">😴 Sleep</button>
+                            <button onclick="sendCommand(this.closest('.device-card'), 'status')" class="btn btn-info">📊 Status</button>
+                            <button onclick="sendCommand(this.closest('.device-card'), 'restart')" class="btn btn-warning">🔄 Restart</button>
+                            <button onclick="showDeepSleepModal(this.closest('.device-card'))" class="btn btn-sleep">😴 Sleep</button>
                         </div>
                     </div>
                     {% endfor %}

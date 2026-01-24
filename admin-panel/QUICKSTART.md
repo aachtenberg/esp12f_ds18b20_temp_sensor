@@ -151,8 +151,16 @@ docker compose logs
 
 After starting, you should see:
 - ✅ Container healthy: `docker ps`
-- ✅ Web page loads: http://localhost:5000
-- ✅ Devices listed (from inventory)
+- ✅ W**"MQTT: Disconnected" warning** = Broker not configured (see Configuration above)
+- ✅ **"MQTT: Connected" (green dot)** = Live updates working!
+- ✅ Devices show "Online" with temperature when MQTT connected
+- ✅ Messages appear in real-time log when MQTT connected
+
+**Not seeing temperatures?**
+1. Configure MQTT broker: `./configure-mqtt.sh`
+2. Restart: `docker compose restart`
+3. Check connection: Look for green "MQTT: Connected" indicator
+4. Wait 30 seconds for device publish cycle
 - ⚠️ MQTT warning if broker not configured (expected on first run)
 - ✅ Devices show "Online" when MQTT connected
 
