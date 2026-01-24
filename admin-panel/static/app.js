@@ -132,16 +132,18 @@ function updateDeviceFromMessage(data) {
 }
 
 // Message Management
-function addMessage(data, autoScroll = true) {
+function addMessage(data, shouldAutoScroll = true) {
     messages.push(data);
     
     // Apply filter
-    const filter = document.getElementById('message-filter').value;
+    const filter = document.getElementById('message-filter')?.value || 'all';
     if (filter !== 'all' && data.type !== filter) {
         return;
     }
     
     const container = document.getElementById('messages-container');
+    if (!container) return;
+    
     const messageEl = document.createElement('div');
     messageEl.className = `message-item ${data.type}`;
     
@@ -160,8 +162,9 @@ function addMessage(data, autoScroll = true) {
     
     container.appendChild(messageEl);
     
-    // Auto-scroll if enabled
-    if (autoScroll && document.getElementById('auto-scroll').checked) {
+    // Auto-scroll if enabled and requested
+    const autoScrollCheckbox = document.getElementById('auto-scroll');
+    if (shouldAutoScroll && autoScrollCheckbox && autoScrollCheckbox.checked) {
         container.scrollTop = container.scrollHeight;
     }
     
