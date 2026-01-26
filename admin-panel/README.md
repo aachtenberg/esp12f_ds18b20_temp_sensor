@@ -1,354 +1,180 @@
-# ESP Sensor Hub - MQTT Admin Panel
+# ESP Sensor Hub - Admin Panel v2.0
 
-Web-based administration panel for monitoring and controlling ESP32/ESP8266 temperature sensor devices via MQTT.
+Modern web interface for monitoring and controlling ESP32/ESP8266 devices via MQTT.
 
 ## Features
 
-- 📡 **Real-time Device Monitoring**: View all devices from inventory with live status updates
-- 📊 **Temperature Display**: Real-time temperature readings from all sensors
-- 🎛️ **Device Control**: Send commands (restart, deep sleep, status requests)
-- 📨 **MQTT Message Viewer**: Monitor all MQTT messages in real-time with advanced filtering
-- 🔍 **Message Filtering**: Filter by topic, device, and message type
-- 🔌 **WebSocket Integration**: Live updates without page refresh
-- 🎨 **Dark Theme UI**: Modern, responsive interface
+- 📊 **Dashboard**: Device status overview, message stats, recent activity
+- 🔧 **Device Management**: Status table with inline configuration controls
+- 📨 **MQTT Log**: Real-time message monitoring with smart auto-scroll
+- ⚙️ **Settings**: Configurable polling interval, device visibility, MQTT broker config
 
-## Screenshots
+### Device Control
+- **Status Table**: Device name, online/offline, type, IP, WiFi, deep sleep status
+- **Slide-out Drawer** (900px): Click any device row to access:
+  - Device-specific message log (last 50 messages)
+  - Status & Restart commands
+  - Deep Sleep configuration (0-3600s, 0=disabled)
+  - Sensor Interval configuration (5-3600s)
+- **Command Retry**: Auto-retries every 2s until confirmed (15 attempts max)
+- **Toast Notifications**: Auto-dismiss feedback (2-3s)
 
-### Dashboard
-- Device cards showing status, temperature, and controls
-- MQTT message log with advanced filtering by topic, device, and type
-- Real-time connection status
+## Quick Start
 
-## Requirements
-
-- Python 3.8+ OR Docker
-- MQTT broker (Mosquitto recommended)
-- Network access to ESP devices
-
-## Quick Start (Docker - Recommended)
-
-### 1. Configure Environment
+### Docker (Recommended)
 
 ```bash
 cd admin-panel
 cp .env.example .env
-# Edit .env with your MQTT broker IP
-```
-
-### 2. Run with Docker
-
-```bash
-./run-docker.sh
-```
-
-Or manually:
-
-```bash
+# Edit .env: set MQTT_BROKER to your broker IP
 docker-compose up -d
 ```
 
-The admin panel will be available at: **http://localhost:5000**
+**Access**: http://localhost:5000
 
-### Docker Commands
-
-```bash
-# View logs
-docker-compose logs -f
-
-# Stop
-docker-compose down
-
-# Restart
-docker-compose restart
-
-# Rebuild after code changes
-docker-compose up -d --build
-```
-
-## Manual Installation (Without Docker)
-
-### 1. Install Dependencies
+### Manual Setup
 
 ```bash
 cd admin-panel
+python -m venv venv
+source venv/bin/activate  # or venv\Scripts\activate on Windows
 pip install -r requirements.txt
-```
 
-### 2. Configure Environment
+# Set environment variables
+export MQTT_BROKER=192.168.0.167
+export MQTT_PORT=1883
 
-Copy the example environment file:
-
-```bash
-cp .env.example .env
-```
-
-Edit `.env` with your settings:
-
-```bash
-# MQTT Broker
-MQTT_BROKER=192.168.0.100  # Your MQTT broker IP
-MQTT_PORT=1883
-MQTT_USERNAME=              # Optional
-MQTT_PASSWORD=              # Optional
-
-# Flask
-SECRET_KEY=your-random-secret-key
-FLASK_PORT=5000
-```
-
-### 3. Run the Application
-
-Using the start script:
-
-```bash
-./start.sh
-```
-
-Or manually:
-
-```bash
-source venv/bin/activate
 python app.py
 ```
 
-The admin panel will be available at: **http://localhost:5000**
+## Configuration
 
-## Usage
+### Environment Variables (.env)
+```bash
+MQTT_BROKER=192.168.0.167    # Required: MQTT broker IP
+MQTT_PORT=1883               # Default: 1883
+MQTT_USERNAME=               # Optional
+MQTT_PASSWORD=               # Optional
+HOST=0.0.0.0                 # Web server host
+PORT=5000                    # Web server port
+DEBUG=False                  # Debug mode
+```
 
-### Device Monitoring
+### Settings Panel
+- **Polling Interval**: Adjust MQTT message polling (1-60s, default 10s)
+- **Device Visibility**: Show/hide devices from table
+- **MQTT Broker**: Test & save broker connection settings
 
-All devices from `temperature-sensor/docs/DEVICE_INVENTORY.md` are automatically loaded and displayed as cards showing:
-- Device name, platform, chip ID
-- Current temperature
-- Online/offline status
-- Last seen timestamp
+## Device Commands
 
-### Sending Commands
+Send via device drawer or programmatically:
 
-**Available Commands:**
+```javascript
+// Via Socket.IO client
+socket.emit('send_command', {
+  device: 'Spa',
+  command: 'deepsleep 30'  // or 'restart', 'status', 'interval 60'
+});
+```
 
-1. **Status Request** - Get current device status
-   ```
-   Click "📊 Status" button
-   ```
+**Supported Commands**:
+- `status` - Request device status
+- `restart` - Restart device
+- `deepsleep <seconds>` - Set deep sleep interval (0=disable, 1-3600=enable)
+- `interval <seconds>` - Set sensor reading interval (5-3600)
 
-2. **Restart Device** - Reboot the device
-   ```
-   Click "🔄 Restart" button
-   ```
-
-3. **Configure Deep Sleep** - Set sleep duration
-   ```
-   Click "😴 Sleep" button
-   Enter seconds (0 to disable)
-   ```
-
-### MQTT Message Log
-
-- View all incoming MQTT messages in real-time
-- **Filter by message type**: temperature, status, events, commands
-- **Filter by device**: Select specific devices from dropdown
-- **Filter by topic**: Text input for partial topic matching
-- Auto-scroll option
-- Color-coded by message type
-- Real-time filtering without page refresh
+**Confirmation Patterns**:
+- Monitors MQTT events topic for success
+- Auto-retries until confirmed or max attempts reached
+- Pattern matching: "deep_sleep_config", "sensor_interval_config", "restarting"
 
 ## Architecture
 
-### Components
+**Backend**: Flask + Flask-SocketIO (eventlet)  
+**MQTT**: Paho client with background thread + polling workaround  
+**Frontend**: Vanilla JavaScript + Socket.IO client  
+**Storage**: LocalStorage for user preferences  
+**Docker**: Single container with health checks  
 
-1. **Flask Web Server** (`app.py`)
-   - Serves web interface
-   - REST API endpoints
-   - WebSocket server
+### Polling Workaround
+- Flask-SocketIO eventlet mode doesn't emit events from MQTT background thread
+- Solution: Client polls server every N seconds (configurable 1-60s)
+- Server maintains last 100 messages and device states in memory
 
-2. **MQTT Client** (`mqtt_client.py`)
-   - Connects to MQTT broker
-   - Subscribes to all esp-sensor-hub topics
-   - Publishes commands
-   - Maintains device state
+### API Endpoints
 
-3. **Configuration** (`config.py`)
-   - Environment variable management
-   - MQTT topic patterns
-   - Device inventory path
+**REST API**:
+- `GET /` - Web interface
+- `GET /health` - Health check
+- `GET /api/config` - Get MQTT config
+- `POST /api/config` - Update MQTT config
+- `GET /api/inventory` - Get device inventory
 
-4. **Web Interface** (`templates/index.html`, `static/`)
-   - Real-time dashboard
-   - Device control interface
-   - Message viewer
-
-### MQTT Topics
-
-The admin panel subscribes to:
-```
-esp-sensor-hub/#
-```
-
-And publishes commands to:
-```
-esp-sensor-hub/{device-name}/command
-```
-
-### WebSocket Events
-
-**Client → Server:**
-- `send_command`: Send command to device
-
-**Server → Client:**
-- `mqtt_status`: MQTT connection status
-- `mqtt_message`: New MQTT message received
-- `device_update`: Device state changed
-- `initial_state`: Full state on connection
-
-## API Endpoints
-
-### GET `/`
-Main dashboard page
-
-### GET `/api/devices`
-Returns JSON array of all devices with current states
-
-### GET `/api/messages`
-Returns JSON array of recent MQTT messages (last 100)
-
-### POST `/api/command`
-Send command to device
-
-**Request Body:**
-```json
-{
-  "device": "Pump House",
-  "command": "restart"
-}
-```
-
-**Response:**
-```json
-{
-  "success": true
-}
-```
-
-## Development
-
-### Running in Development Mode
-
-```bash
-export FLASK_DEBUG=True
-python app.py
-```
-
-### Adding New Features
-
-1. **New Commands**: Add to command buttons in `templates/index.html`
-2. **Message Filters**: Update filter options in `static/app.js`
-3. **Device Actions**: Extend `mqtt_client.py` publish methods
+**WebSocket Events**:
+- `connect` - Socket.IO connection established
+- `mqtt_message` - New MQTT message received
+- `mqtt_status` - MQTT broker connection status
+- `device_update` - Device state changed
+- `command_response` - Command execution result
+- `send_command` - Send command to device (emit)
+- `request_state` - Request full state update (emit)
 
 ## Troubleshooting
 
-### MQTT Connection Failed
+**Messages not updating**:
+- Check Settings → Polling Interval (default 10s)
+- Lower interval for faster updates (increases server load)
+- Check Docker logs: `docker-compose logs -f`
 
-**Check:**
-- MQTT broker is running: `systemctl status mosquitto`
-- Network connectivity: `ping {MQTT_BROKER}`
-- Firewall allows port 1883
-- Username/password correct (if authentication enabled)
+**MQTT connection failed**:
+- Verify broker IP in .env file
+- Test connectivity: `mosquitto_sub -h BROKER_IP -t "#" -v`
+- Check Settings → MQTT Broker Configuration → Test & Save
 
-### Devices Not Appearing
+**Device shows offline**:
+- Check device last_seen timestamp (must be < 5 minutes)
+- Verify device is publishing to `esp-sensor-hub/{device}/status`
+- Check MQTT log for device messages
 
-**Check:**
-- Device inventory file path in `.env`
-- Devices are publishing to correct MQTT topics
-- MQTT broker shows subscriptions: `mosquitto_sub -h localhost -t "esp-sensor-hub/#" -v`
+**Commands not confirming**:
+- Device may be in deep sleep (retry will keep trying)
+- Check device drawer message log for events topic
+- Verify device firmware handles command topic
 
-### WebSocket Disconnects
+## Development
 
-**Check:**
-- Browser console for errors
-- Flask logs for connection issues
-- Network stability
-
-## Security Considerations
-
-- Change `SECRET_KEY` in production
-- Use MQTT authentication (username/password)
-- Consider MQTT over TLS for remote access
-- Restrict Flask `HOST` to localhost for local-only access
-- Use reverse proxy (nginx) for production deployment
-
-## Production Deployment
-
-### Using systemd Service
-
-Create `/etc/systemd/system/mqtt-admin-panel.service`:
-
-```ini
-[Unit]
-Description=ESP Sensor Hub MQTT Admin Panel
-After=network.target mosquitto.service
-
-[Service]
-Type=simple
-User=your-user
-WorkingDirectory=/path/to/esp-sensor-hub/admin-panel
-Environment="PATH=/path/to/venv/bin"
-ExecStart=/path/to/venv/bin/python app.py
-Restart=always
-
-[Install]
-WantedBy=multi-u (Included)
-
-The project includes full Docker support:
-
-**Quick Start:**
 ```bash
-./run-docker.sh
+# Install dependencies
+pip install -r requirements.txt
+
+# Run in debug mode
+DEBUG=True python app.py
+
+# Watch logs
+docker-compose logs -f
+
+# Rebuild after changes
+docker-compose up -d --build
 ```
 
-**Docker Compose:**
-```bash
-docker-compose up -d
-```
+## Version History
 
-**Features:**
-- Auto-restart on failure
-- Health checks
-- Volume mount for live device inventory updates
-- Configurable via .env file
-- Optimized multi-stage build with caching
+### v2.0 (January 2026)
+- Complete UI redesign with modern dark theme
+- Sidebar navigation with 4 sections
+- 900px slide-out device drawer
+- Inline configuration controls (deep sleep, sensor interval)
+- Command retry logic with confirmation
+- Configurable polling interval
+- Auto-dismiss toast notifications
+- UTC timezone fixes for local time display
+- Smart auto-scrolling MQTT log
 
-**Network Configuration:**
-
-By default, uses bridge networking. If your MQTT broker is on the host machine:
-
-1. Edit `docker-compose.yml`
-2. Uncomment `network_mode: host`
-3. Comment out `ports` and `networks` sections
-EXPOSE 5000
-CMD ["python", "app.py"]
-```
-
-Build and run:
-```bash
-docker build -t mqtt-admin-panel .
-docker run -d -p 5000:5000 --env-file .env mqtt-admin-panel
-```
-
-## Contributing
-
-1. Create feature branch: `git checkout -b feature/new-feature`
-2. Make changes
-3. Test thoroughly
-4. Submit pull request
+### v1.0 (2025)
+- Initial release with basic monitoring
+- Simple device cards layout
+- Basic MQTT message display
 
 ## License
 
-Same as parent project (esp-sensor-hub)
-
-## Related Documentation
-
-- [Temperature Sensor Configuration](../docs/temperature-sensor/CONFIG.md)
-- [Platform Guide](../docs/reference/PLATFORM_GUIDE.md)
-- [Device Inventory](../temperature-sensor/docs/DEVICE_INVENTORY.md)
-- [MQTT Device Control Script](../scripts/mqtt_device_control.sh)
+Part of ESP Sensor Hub project. See main repository LICENSE file.
