@@ -1,0 +1,301 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ESP Sensor Hub - Admin Panel</title>
+    <link href="https://fonts.googleapis.com/css2?family=Ubuntu:wght@300;400;500;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+    <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
+</head>
+<body>
+    <div class="app-container">
+        <!-- Left Sidebar Navigation -->
+        <aside class="sidebar">
+            <div class="sidebar-header">
+                <h1>🌡️ ESP Hub</h1>
+                <button class="sidebar-toggle" id="sidebar-toggle">☰</button>
+            </div>
+
+            <nav class="sidebar-nav">
+                <button class="nav-item active" data-section="dashboard">
+                    <span class="nav-icon">📊</span>
+                    <span class="nav-label">Dashboard</span>
+                </button>
+                <button class="nav-item" data-section="devices">
+                    <span class="nav-icon">📡</span>
+                    <span class="nav-label">Devices</span>
+                </button>
+                <button class="nav-item" data-section="messages">
+                    <span class="nav-icon">📨</span>
+                    <span class="nav-label">MQTT Log</span>
+                </button>
+                <button class="nav-item" data-section="settings">
+                    <span class="nav-icon">⚙️</span>
+                    <span class="nav-label">Settings</span>
+                </button>
+            </nav>
+        </aside>
+
+        <!-- Main Content Area -->
+        <main class="main-content">
+            <header class="top-bar">
+                <div class="header-left">
+                    <h2 id="section-title">Dashboard</h2>
+                </div>
+                <div class="header-right">
+                    <div class="mqtt-status-header">
+                        <span id="mqtt-status-indicator" class="status-dot offline"></span>
+                        <span id="mqtt-status-text">Connecting to {{ mqtt_broker }}...</span>
+                    </div>
+                </div>
+            </header>
+
+            <!-- Dashboard Section -->
+            <section id="dashboard-section" class="content-section active">
+                <div class="dashboard-grid">
+                    <div class="stat-card">
+                        <div class="stat-label">Active Devices</div>
+                        <div class="stat-value" id="active-devices-count">0</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-label">Total Devices</div>
+                        <div class="stat-value" id="total-devices-count">0</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-label">Messages/min</div>
+                        <div class="stat-value" id="messages-rate">0</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-label">MQTT Status</div>
+                        <div class="stat-value" id="mqtt-health">🔴</div>
+                    </div>
+                </div>
+
+                <div class="recent-activity">
+                    <h3>Recent Activity</h3>
+                    <div id="recent-messages-list" class="messages-mini"></div>
+                </div>
+            </section>
+
+            <!-- Devices Section -->
+            <section id="devices-section" class="content-section">
+                <div class="section-controls">
+                    <input type="text" id="device-filter" placeholder="Filter devices..." class="filter-input">
+                    <select id="status-filter" class="filter-select">
+                        <option value="all">All Status</option>
+                        <option value="online">Online</option>
+                        <option value="offline">Offline</option>
+                    </select>
+                    <select id="device-topic-filter" class="filter-select">
+                        <option value="all">All Topics</option>
+                    </select>
+                </div>
+
+                <div class="devices-table-wrapper">
+                    <table class="devices-table">
+                        <thead>
+                            <tr>
+                                <th>Device</th>
+                                <th>Status</th>
+                                <th>Type</th>
+                                <th>IP</th>
+                                <th>WiFi</th>
+                                <th>Deep Sleep</th>
+                            </tr>
+                        </thead>
+                        <tbody id="devices-tbody">
+                            <!-- Populated by JavaScript -->
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+
+            <!-- MQTT Messages Section -->
+            <section id="messages-section" class="content-section">
+                <div class="section-controls">
+                    <button onclick="clearMessages()" class="btn btn-sm btn-danger">Clear</button>
+                    <label class="checkbox-label">
+                        <input type="checkbox" id="auto-scroll" checked> Auto-scroll
+                    </label>
+                    <select id="message-filter" class="filter-select">
+                        <option value="all">All Messages</option>
+                        <option value="temperature">Temperature</option>
+                        <option value="status">Status</option>
+                        <option value="events">Events</option>
+                        <option value="command">Commands</option>
+                    </select>
+                    <select id="device-message-filter" class="filter-select">
+                        <option value="all">All Devices</option>
+                    </select>
+                    <input type="text" id="topic-filter" placeholder="Filter by topic..." class="filter-input">
+                </div>
+                <div id="messages-container" class="messages-log"></div>
+            </section>
+
+            <!-- Settings Section -->
+            <section id="settings-section" class="content-section">
+                <div class="settings-grid">
+                    <!-- MQTT Configuration -->
+                    <div class="settings-card">
+                        <h3>MQTT Broker Configuration</h3>
+                        <form id="mqtt-config-form" class="settings-form">
+                            <div class="form-group">
+                                <label for="mqtt-broker">Broker Address:</label>
+                                <input type="text" id="mqtt-broker" name="broker" placeholder="192.168.0.167" required>
+                            </div>
+
+                            <div class="form-group">
+                                <label for="mqtt-port">Port:</label>
+                                <input type="number" id="mqtt-port" name="port" min="1" max="65535" placeholder="1883" required>
+                            </div>
+
+                            <div class="form-group">
+                                <label for="mqtt-username">Username (optional):</label>
+                                <input type="text" id="mqtt-username" name="username" placeholder="Leave blank if not needed">
+                            </div>
+
+                            <div class="form-group">
+                                <label for="mqtt-password">Password (optional):</label>
+                                <input type="password" id="mqtt-password" name="password" placeholder="Leave blank if not needed">
+                            </div>
+
+                            <div class="form-actions">
+                                <button type="submit" class="btn btn-primary">Test & Save Connection</button>
+                                <button type="button" class="btn btn-secondary" onclick="resetMQTTForm()">Reset</button>
+                            </div>
+
+                            <div id="connection-status" class="connection-status">
+                                <span class="status-dot offline"></span>
+                                <span class="status-text">Status: Unknown</span>
+                            </div>
+                        </form>
+                    </div>
+
+                    <!-- Device Visibility -->
+                    <div class="settings-card">
+                        <h3>Device Visibility</h3>
+                        <p style="color: var(--text-secondary); font-size: 0.9rem; margin-bottom: 15px;">Show/hide devices in the Devices section</p>
+                        <div id="device-visibility-list" class="device-visibility-list">
+                            <!-- Populated by JavaScript -->
+                        </div>
+                    </div>
+
+                    <!-- Polling Configuration -->
+                    <div class="settings-card">
+                        <h3>Polling Configuration</h3>
+                        <div class="form-group">
+                            <label for="polling-interval">MQTT Polling Interval (seconds):</label>
+                            <input type="number" id="polling-interval" min="1" max="60" value="10" step="1">
+                            <small style="color: var(--text-secondary); display: block; margin-top: 0.5rem;">
+                                How often to check for new MQTT messages (1-60 seconds). Current: <strong id="current-polling">10s</strong>
+                            </small>
+                        </div>
+                        <button class="btn btn-primary" onclick="updatePollingInterval()">Apply Polling Interval</button>
+                    </div>
+
+                    <!-- About -->
+                    <div class="settings-card">
+                        <h3>About</h3>
+                        <div class="about-info">
+                            <p><strong>ESP Sensor Hub Admin Panel</strong></p>
+                            <p>Real-time monitoring and control for ESP32/ESP8266 devices.</p>
+                            <p class="version-text">Version: 2.0.0</p>
+                        </div>
+                    </div>
+                </div>
+            </section>
+        </main>
+    </div>
+
+    <!-- Toast Container -->
+    <div id="toast-container" class="toast-container"></div>
+
+    <!-- Deep Sleep Modal -->
+    <div id="sleep-modal" class="modal">
+        <div class="modal-content">
+            <span class="close" onclick="closeSleepModal()">&times;</span>
+            <h2>Configure Deep Sleep</h2>
+            <p>Device: <strong id="sleep-device-name"></strong></p>
+            <div class="form-group">
+                <label for="sleep-seconds">Sleep Duration (seconds):</label>
+                <input type="number" id="sleep-seconds" min="0" max="3600" value="30" step="10">
+                <small>Set to 0 to disable deep sleep</small>
+            </div>
+            <div class="modal-buttons">
+                <button onclick="sendDeepSleepCommand()" class="btn btn-primary">Apply</button>
+                <button onclick="closeSleepModal()" class="btn btn-secondary">Cancel</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Device Details Modal -->
+    <div id="device-details-modal" class="modal device-modal">
+        <div class="modal-content device-modal-content">
+            <div class="device-modal-header">
+                <h2 id="device-modal-title">Device Details</h2>
+                <span class="close" onclick="closeDeviceDetails()">&times;</span>
+            </div>
+            <div class="device-modal-body">
+                <div class="device-info-grid">
+                    <div class="device-info-item">
+                        <span class="info-label">Status:</span>
+                        <span id="device-modal-status" class="status-badge">Unknown</span>
+                    </div>
+                    <div class="device-info-item">
+                        <span class="info-label">Last Seen:</span>
+                        <span id="device-modal-last-seen">--</span>
+                    </div>
+                    <div class="device-info-item">
+                        <span class="info-label">Messages:</span>
+                        <span id="device-modal-msg-count">0</span>
+                    </div>
+                </div>
+                
+                <div class="device-commands">
+                    <button class="btn btn-sm btn-info" onclick="sendCommandFromModal('status')">📊 Status</button>
+                    <button class="btn btn-sm btn-warning" onclick="sendCommandFromModal('restart')">🔄 Restart</button>
+                </div>
+                
+                <div class="device-config-section" style="margin: 1.5rem 0; padding: 1rem; background: var(--bg-darkest); border-radius: 8px;">
+                    <h3 style="margin-top: 0; margin-bottom: 1rem; font-size: 1.1rem;">⚙️ Configuration</h3>
+                    
+                    <!-- Deep Sleep -->
+                    <div style="margin-bottom: 1.5rem;">
+                        <label style="display: block; margin-bottom: 0.5rem; font-weight: 600;">Deep Sleep Interval (seconds)</label>
+                        <div style="display: flex; gap: 0.5rem; align-items: center;">
+                            <input type="number" id="device-sleep-seconds" min="0" max="3600" value="0" step="10" 
+                                   style="flex: 1; padding: 0.5rem; background: var(--bg-card); border: 1px solid var(--border-color); border-radius: 4px; color: var(--text-primary);" 
+                                   placeholder="0 = Disabled">
+                            <button class="btn btn-sm btn-primary" onclick="configureDeepSleep()" style="white-space: nowrap;">Apply Sleep</button>
+                        </div>
+                        <small style="color: var(--text-secondary); display: block; margin-top: 0.25rem;">0 to disable, 1-3600 to enable. Device sleeps between readings to save battery.</small>
+                    </div>
+                    
+                    <!-- Sensor Interval -->
+                    <div>
+                        <label style="display: block; margin-bottom: 0.5rem; font-weight: 600;">Sensor Reading Interval (seconds)</label>
+                        <div style="display: flex; gap: 0.5rem; align-items: center;">
+                            <input type="number" id="device-interval-seconds" min="5" max="3600" value="30" step="5" 
+                                   style="flex: 1; padding: 0.5rem; background: var(--bg-card); border: 1px solid var(--border-color); border-radius: 4px; color: var(--text-primary);" 
+                                   placeholder="30">
+                            <button class="btn btn-sm btn-primary" onclick="configureSensorInterval()" style="white-space: nowrap;">Apply Interval</button>
+                        </div>
+                        <small style="color: var(--text-secondary); display: block; margin-top: 0.25rem;">How often to read sensors when awake (5-3600 seconds).</small>
+                    </div>
+                </div>
+                
+                <div class="device-log-container">
+                    <div class="device-log-header">
+                        <h3>Device Messages</h3>
+                        <button class="btn btn-sm btn-secondary" onclick="clearDeviceLog()">Clear</button>
+                    </div>
+                    <div id="device-modal-log" class="device-log"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>
